@@ -336,6 +336,21 @@ jobs:
 > [!NOTE]
 > **Re-evaluating state management for production:** Since `deals_state.json` is gitignored and not committed, GitHub Actions has no persistent state across runs. This means if a BOGO sale runs for multiple days, you will receive a notification every day. If this becomes noisy, consider committing `deals_state.json` to the repo and adding a workflow step to commit it back after each run.
 
+### ✅ Confirmed E2E Test Result — May 31, 2026
+
+**Trigger:** GitHub Actions manual run with `include_expired=true`
+**Python version:** 3.12 (after fixing from 3.11)
+
+**Results:**
+- 6 ntfy push notifications received on phone ✅
+  - 3 × Lancome expired BOGO deals (Lancome runs first per config order)
+  - 3 × Clinique expired BOGO deals
+- All deals had correct keyword matches (`bogo`, `buy 1 get 1`)
+- Both brands extracted successfully from the official sid-filtered URLs
+- State file updated in the ephemeral Actions environment
+
+**Conclusion:** Full pipeline confirmed working end-to-end on GitHub Actions. Daily cron (`0 10 * * *`) is now live and will alert on the next active BOGO sale event.
+
 ---
 
 ## 11. Credit Usage
