@@ -154,22 +154,22 @@ def check_product(sgai: ScrapeGraphAI, product: dict) -> None:
             notify_extraction_error(name, result.error or "Unknown error")
             return
 
-        # result.data is an ExtractResponse object — access fields as attributes.
-        # Use a helper that also falls back to dict-key access in case the SDK
-        # returns a plain dict in a future version.
-        def _get(obj, key):
-            if isinstance(obj, dict):
-                return obj[key]
-            return getattr(obj, key)
+        # ExtractResponse.json_data is the dict containing our extracted schema fields
+        json_data = result.data.json_data
+        if not json_data:
+            msg = f"json_data is empty. raw response: {result.data.raw}"
+            print(f"  ❌ {msg}")
+            notify_extraction_error(name, msg)
+            return
 
         try:
-            price = float(_get(result.data, "current_price"))
-            product_title = str(_get(result.data, "product_title"))
-            stock_status = str(_get(result.data, "stock_status"))
-        except Exception as exc:
-            print(f"  ❌ Failed to read extraction result fields: {exc}")
-            print(f"  Raw result.data: {result.data}")
-            notify_extraction_error(name, f"Field access error: {exc}")
+            price = float(json_data["current_price"])
+            product_title = str(json_data["product_title"])
+            stock_status = str(json_data["stock_status"])
+        except (KeyError, TypeError, ValueError) as exc:
+            print(f"  ❌ Failed to read fields from json_data: {exc}")
+            print(f"  json_data contents: {json_data}")
+            notify_extraction_error(name, f"Field read error: {exc} | json_data: {json_data}")
             return
 
         print(f"  Title:  {product_title}")
