@@ -1,37 +1,59 @@
-# B&H Photo MacBook Price Tracker
+# Price & Deal Tracker
 
-Automated daily price monitor for Apple MacBook Pro M5 listings on B&H Photo.
+Automated monitors for product prices and sale events.
 Uses **ScrapeGraphAI** (AI extraction) + **GitHub Actions** (scheduling) + **ntfy.sh** (push notifications).
-
-Sends a push notification to your phone when the price drops below your configured threshold.
 
 ---
 
-## How It Works
+## Trackers
+
+### 1. 🛍️ Dealmoon BOGO Deal Tracker (`check_deals.py`)
+
+Monitors Dealmoon brand pages for "Buy One Get One" (BOGO) sale events on **Clinique** and **Lancome**.
+Sends a high-priority push notification the moment a new active BOGO deal is detected.
+
+```
+GitHub Actions (daily 10:00 UTC)
+    └── check_deals.py
+            ├── sgai.extract(clinique_url)  ← AI reads brand page
+            ├── sgai.extract(lancome_url)   ← AI reads brand page
+            └── BOGO keyword match + new deal → ntfy.sh → 📱 your phone
+```
+
+**Key features:**
+- 3-attempt retry loop with exponential backoff (15s, 30s) to handle transient HTTP 502/504 errors
+- Automatic URL fallback — complex search URL → clean canonical landing URL
+- State deduplication — `deals_state.json` tracks notified deals to prevent spam
+- `INCLUDE_EXPIRED=true` mode for real-data end-to-end pipeline testing
+
+---
+
+### 2. 💻 B&H Photo MacBook Price Tracker (`check_prices.py`) — *Currently Paused*
+
+Monitors B&H Photo for MacBook Pro M5 price drops below a configured threshold.
+All products are currently set to `"active": false` in `products.json`.
 
 ```
 GitHub Actions (daily 09:00 UTC)
     └── check_prices.py
-            ├── sgai.extract(silver_url)      ← AI reads the B&H page
-            ├── sgai.extract(space_black_url) ← AI reads the B&H page
             └── price < threshold → ntfy.sh → 📱 your phone
 ```
 
-No server required. Runs entirely on GitHub's free infrastructure.
+To re-enable, set `"active": true` for the desired product in `products.json`.
 
 ---
 
 ## Prerequisites
 
-- Python 3.12+ (`scrapegraph-py` v2.x requires 3.12)
-- A [ScrapeGraphAI](https://scrapegraphai.com/dashboard) account (free tier is sufficient)
-- The [ntfy app](https://ntfy.sh) installed on your phone
+- Python 3.11+
+- A [ScrapeGraphAI](https://scrapegraphai.com/dashboard) account (free tier)
+- The [ntfy app](https://ntfy.sh) installed on your phone, subscribed to your topic
 
 ---
 
 ## Setup
 
-### Step 1 — Install Dependencies (local testing only)
+### Step 1 — Install Dependencies
 
 ```bash
 pip install -r requirements.txt
@@ -39,121 +61,125 @@ pip install -r requirements.txt
 
 ### Step 2 — Configure `.env` (local testing only)
 
-Edit `.env` and fill in your values:
-
 ```bash
 SGAI_API_KEY=sgai-xxxxxxxxxxxxxxxxxxxxxxxx   # from scrapegraphai.com/dashboard
 NTFY_TOPIC=your-ntfy-topic            # already set — use as-is
 ```
 
-### Step 3 — Subscribe to Push Notifications
-
-1. Install the **ntfy** app: [iOS](https://apps.apple.com/app/ntfy/id1625396347) / [Android](https://play.google.com/store/apps/details?id=io.heckel.ntfy)
-2. Tap **+** → enter topic: `your-ntfy-topic`
-3. Tap Subscribe ✅
-
-### Step 4 — Test Locally
-
-**Test that ntfy works (no API key needed):**
-```bash
-curl -d "Test from price tracker" -H "Title: Test Alert" https://ntfy.sh/your-ntfy-topic
-```
-You should receive a notification on your phone immediately.
-
-**Simulate a price drop (tests the full pipeline):**
-```bash
-PRICE_OVERRIDE=2499.00 python check_prices.py
-```
-Expected output: both products trigger alerts, ntfy notifications arrive on phone.
-
-**Test no-alert path (price above threshold):**
-```bash
-PRICE_OVERRIDE=2799.00 python check_prices.py
-```
-Expected output: "Above threshold — no alert."
-
-**Run a real live check:**
-```bash
-python check_prices.py
-```
-Calls the SGAI API with your key and extracts live prices from B&H Photo.
-
-### Step 5 — Push to GitHub (Private Repo)
-
-```bash
-git init
-git remote add origin https://github.com/YOUR_USERNAME/YOUR_REPO.git
-git add .
-git commit -m "feat: initial price tracker setup"
-git push -u origin main
-```
-
-### Step 6 — Add GitHub Secrets
+### Step 3 — Add GitHub Secrets
 
 In your GitHub repo: **Settings → Secrets and variables → Actions → New repository secret**
 
 | Name | Value |
 |---|---|
 | `SGAI_API_KEY` | Your ScrapeGraphAI API key |
-| `NTFY_TOPIC` | `your-ntfy-topic` |
-
-### Step 7 — Test GitHub Actions
-
-1. Go to **Actions → B&H MacBook Price Check → Run workflow**
-2. In the `price_override` field, enter `2499.00`
-3. Click **Run workflow**
-4. Watch the run log — prices printed, ntfy notification fires on your phone ✅
-5. Repeat with the field blank to verify a real live extraction ✅
-
-The daily cron (`0 9 * * *`) activates automatically after the first push.
+| `NTFY_TOPIC` | Your ntfy topic name |
 
 ---
 
-## Managing Products
+## Running Locally
 
-Products are configured in [`products.json`](./products.json). No code changes needed.
+### Dealmoon BOGO Tracker
 
-### Add a new product
+**Normal run (active deals only):**
+```bash
+python check_deals.py
+```
+
+**Real-data E2E test (includes expired BOGO deals — verifies full pipeline):**
+```bash
+# Linux / macOS
+INCLUDE_EXPIRED=true python check_deals.py
+
+# Windows PowerShell
+$env:INCLUDE_EXPIRED="true"; python check_deals.py
+```
+Expected: Historical Clinique/Lancome BOGO events are matched, `deals_state.json` is updated,
+and a high-priority push notification fires on your phone.
+
+**Re-run E2E test to verify deduplication:**
+```bash
+$env:INCLUDE_EXPIRED="true"; python check_deals.py
+```
+Expected: "Already notified — skipping duplicate alert." No push notification fires again.
+
+### MacBook Price Tracker
+
+```bash
+# Real live price check
+python check_prices.py
+
+# Simulate a price drop (no SGAI call)
+PRICE_OVERRIDE=2499.00 python check_prices.py
+```
+
+---
+
+## Testing on GitHub Actions
+
+### BOGO Tracker — Real-Data E2E Test
+1. Go to **Actions → Dealmoon BOGO Daily Check → Run workflow**
+2. Set `include_expired` input to `true`
+3. Click **Run workflow**
+4. Confirm: run log shows extracted deals, BOGO keyword matches, and ntfy alert fires on phone ✅
+
+### BOGO Tracker — Normal Scheduled Run
+The daily cron (`0 10 * * *`) triggers automatically.
+When a new active BOGO deal is found, you will receive a push notification.
+
+---
+
+## Managing Deals Configuration
+
+Brand configurations are in [`deals_config.json`](./deals_config.json). No code changes needed.
+
+### Add a new brand
 ```json
 {
-  "name": "Sony A7C II (Amazon)",
-  "url": "https://www.amazon.com/dp/B0CG5KG7GS",
-  "threshold": 2000.00,
+  "brand": "Estee Lauder",
+  "url": "https://www.dealmoon.com/en/top/estee-lauder?type=1&...",
+  "fallback_url": "https://www.dealmoon.com/en/top/estee-lauder",
+  "keywords": ["buy one get one", "bogo", "b1g1", "buy 1 get 1"],
   "active": true
 }
 ```
 
-### Pause tracking after purchase (don't delete — preserve history)
+### Pause a brand
 ```json
 {
-  "name": "MacBook Pro M5 Silver 14\"",
-  "url": "https://...",
-  "threshold": 2700.00,
-  "active": false,
-  "purchased_at": "2026-06-15",
-  "purchased_price": 2649.00
+  "brand": "Clinique",
+  ...
+  "active": false
 }
 ```
 
 ---
 
-## Credit Usage (Free Plan)
+## Managing Price Products
 
-| Products | Calls/month | Est. credits | Free tier (500/mo) |
-|---|---|---|---|
-| 2 | 62 | 310–496 | ✅ Covered |
-| 4 | 124 | 620–992 | ❌ Upgrade needed |
+Products are configured in [`products.json`](./products.json).
 
-A **$5 one-time top-up** (1,000 non-expiring credits) extends the free plan to ~4 products for several months.
+### Re-enable a paused MacBook product
+```json
+{
+  "name": "MacBook Pro M5 Space Black 14\"",
+  "url": "https://...",
+  "threshold": 2700.00,
+  "active": true
+}
+```
 
 ---
 
-## Switching to Telegram Notifications
+## Credit Usage
 
-1. Create a bot via [@BotFather](https://t.me/BotFather) → `/newbot` → copy **Bot Token**
-2. Message your bot, then visit `https://api.telegram.org/bot<TOKEN>/getUpdates` → copy **Chat ID**
-3. Add `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` to `.env` and GitHub Secrets
-4. In `check_prices.py`, uncomment the `send_telegram()` function and replace calls to `notify_price_drop()` and `notify_extraction_error()` with it
+| Tracker | Schedule | Calls/month | Credits/month |
+|---|---|---|---|
+| BOGO Tracker (2 brands) | Daily | 60 | 600 |
+| MacBook Tracker | Paused | 0 | 0 |
+| **Total** | | **60** | **600** |
+
+The free plan provides **500 credits/month + 500 one-time bonus**. The one-time buffer covers the first month's overage of 100 credits. A **$5 one-time top-up** (1,000 non-expiring credits) provides a comfortable ongoing buffer.
 
 ---
 
@@ -161,8 +187,9 @@ A **$5 one-time top-up** (1,000 non-expiring credits) extends the free plan to ~
 
 | Symptom | Likely Cause | Fix |
 |---|---|---|
-| `result.status == "error"` | SGAI credits exhausted or API key invalid | Check dashboard for credit balance |
-| Price is 0.0 or very wrong | Cloudflare blocked the request | Sanity guard fires an ntfy error alert automatically |
+| `HTTP 502/504` on extraction | Transient proxy timeout | Retry logic handles this automatically (3 attempts + fallback URL) |
+| `result.status == "error"` | SGAI credits exhausted or invalid key | Check dashboard credit balance |
 | No ntfy notification | Wrong topic name | Confirm topic in ntfy app matches `NTFY_TOPIC` in secrets |
-| GitHub Actions not running | Workflow not triggered yet | Run manually via Actions tab first; daily cron starts automatically |
-| Actions tab shows no runs | Repo was just created | Push a commit to activate; then trigger manually |
+| BOGO deal not detected | Keywords don't match | Check `deals_config.json` keywords vs. actual deal text |
+| Duplicate alerts | State file reset or deleted | `deals_state.json` tracks notified deals — do not delete manually |
+| GitHub Actions not running | Workflow not triggered yet | Run manually via Actions tab first |

@@ -1,6 +1,9 @@
 # Secrets — never commit these
 .env
 
+# Runtime state — local only
+deals_state.json
+
 # Python
 __pycache__/
 *.py[cod]
