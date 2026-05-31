@@ -355,7 +355,34 @@ jobs:
 
 ## 12. Post-Launch Changes & Fixes
 
+### v2 → v2.1: Python Version Fix in GitHub Actions Workflow
+
+**Date:** May 31, 2026 (first GitHub Actions manual trigger)
+
+**Issue:** `pip install -r requirements.txt` failed in GitHub Actions with:
+```
+ERROR: Could not find a version that satisfies the requirement scrapegraph-py>=2.1.0
+ERROR: Ignored the following versions that require a different python version:
+       2.0.1 Requires-Python >=3.12; 2.1.0 Requires-Python >=3.12
+```
+
+**Root cause:** `deal_check.yml` was configured with `python-version: "3.11"`. The `scrapegraph-py` v2.x package requires **Python 3.12+**.
+
+**Fix:** Updated `deal_check.yml` to Python 3.12 and latest action versions to match `price_check.yml`:
+```diff
+-      - uses: actions/checkout@v4
++      - uses: actions/checkout@v5
+-      - uses: actions/setup-python@v5
++      - uses: actions/setup-python@v6
+         with:
+-          python-version: "3.11"
++          python-version: "3.12"
+```
+
+---
+
 ### v1 → v1.1: `UnicodeEncodeError` Bug Fix
+
 
 **Date:** May 31, 2026 (during initial local testing)
 
