@@ -2,29 +2,27 @@
 Dealmoon BOGO Sale Event Tracker
 ---------------------------------
 Reads deals_config.json, uses ScrapeGraphAI to AI-extract deals from Dealmoon
-brand pages, and sends an ntfy.sh push notification when a "Buy One Get One"
-(BOGO) event is detected on an active deal.
+official-brand pages (sid-filtered URLs only — no multi-store aggregator pages),
+and sends an ntfy.sh push notification when a new "Buy One Get One" (BOGO)
+active deal is detected.
 
-Resilience features:
-  - 3-attempt retry loop with exponential backoff (15s, 30s) for transient
-    HTTP 502/504 errors from ScrapeGraphAI's browser proxy.
-  - Automatic fallback to a clean canonical landing URL if all retries on the
-    primary complex URL fail.
-  - Defensive dict-based parsing of ExtractResponse.json_data to avoid
-    attribute-access errors from SDK version differences.
+Retry logic:
+  1. Extract Lancome (up to 3 attempts), then Clinique (up to 3 attempts).
+  2. If Lancome failed but Clinique succeeded → retry Lancome up to 3 more times.
+  3. If ALL brands failed → wait FLOW_RETRY_WAIT hours, then retry entire flow once.
+  4. If retry flow also fails → send error notification and exit 1.
 
 State management:
-  - Tracks notified deal titles in deals_state.json to prevent duplicate alerts.
+  - deals_state.json tracks notified deal titles to prevent duplicate alerts.
 
-Testing mode:
-  - Set INCLUDE_EXPIRED=true to include expired deals from Dealmoon.
-    This is used for real-data end-to-end pipeline testing (e.g. via GitHub
-    Actions manual trigger) without injecting any fake data.
+Testing mode (E2E via GitHub Actions only — do NOT run locally to preserve credits):
+  - INCLUDE_EXPIRED=true: swaps expiredClick=n → y in the URL so Dealmoon also
+    serves expired deals, enabling real-data pipeline verification without fake data.
+    Expired deals are NEVER processed in daily (normal) runs.
 
 Usage:
-  Normal run:          python check_deals.py
-  E2E pipeline test:   INCLUDE_EXPIRED=true python check_deals.py  (Linux/macOS)
-                       $env:INCLUDE_EXPIRED="true"; python check_deals.py  (PowerShell)
+  Normal daily run:   python check_deals.py
+  E2E pipeline test:  INCLUDE_EXPIRED=true python check_deals.py
 """
 
 import json
@@ -51,8 +49,12 @@ SGAI_API_KEY     = os.getenv("SGAI_API_KEY", "")
 NTFY_TOPIC       = os.getenv("NTFY_TOPIC", "")
 INCLUDE_EXPIRED  = os.getenv("INCLUDE_EXPIRED", "false").strip().lower() == "true"
 
+# Per-brand retry settings
 MAX_RETRIES      = 3
-RETRY_DELAYS     = [15, 30]   # seconds between attempts (exponential backoff)
+RETRY_DELAYS     = [15, 30]        # seconds between attempts (exponential backoff)
+
+# Full-flow retry: wait this long before retrying all brands when everything fails
+FLOW_RETRY_WAIT  = 2 * 3600       # 2 hours
 
 BASE_DIR         = os.path.dirname(__file__)
 CONFIG_PATH      = os.path.join(BASE_DIR, "deals_config.json")
@@ -62,14 +64,25 @@ STATE_PATH       = os.path.join(BASE_DIR, "deals_state.json")
 # ── Pydantic Schema ────────────────────────────────────────────────────────────
 
 class Deal(BaseModel):
-    """A single deal/promotion extracted from a Dealmoon brand page."""
-    title:      str  = Field(description="The main title or headline of the deal")
-    description: str = Field(description="Full details of the deal including terms, promo codes, or gifts")
-    is_expired: bool = Field(description="True if the deal is explicitly marked as expired on the page, otherwise False")
+    """A single deal/promotion extracted from a Dealmoon official-brand page."""
+    title:       str  = Field(description="The main title or headline of the deal")
+    description: str  = Field(
+        description="Full details of the deal including terms, promo codes, gift items, or expiry"
+    )
+    deal_date:   str  = Field(
+        description=(
+            "The date the deal started or was posted on Dealmoon. Look for date labels "
+            "near the deal title or post timestamp (e.g. 'May 30', '2026-05-30'). "
+            "Return as a human-readable string, or empty string if not found."
+        )
+    )
+    is_expired:  bool = Field(
+        description="True if the deal is explicitly marked as expired on the page, otherwise False"
+    )
 
 
 class DealmoonSchema(BaseModel):
-    """Wrapper schema for a list of deals extracted from a Dealmoon page."""
+    """Wrapper schema for all deals on a Dealmoon official-brand page."""
     deals: list[Deal] = Field(description="All deals listed on the page")
 
 
@@ -103,10 +116,10 @@ def mark_notified(state: dict, title: str) -> None:
 def _send_ntfy(title: str, body: str, priority: str = "default", tags: str = "") -> None:
     """POST a push notification to ntfy.sh.
 
-    HTTP headers must be latin-1 encodeable. Non-latin-1 characters (e.g. em
-    dashes, Chinese characters) in the Title header cause a UnicodeEncodeError.
-    We sanitise the header value to ASCII, replacing un-encodeable characters
-    with '?', while keeping the full Unicode text in the (UTF-8) body.
+    HTTP headers must be latin-1 encodeable. Non-latin-1 characters in deal
+    titles (e.g. fullwidth colons, em dashes from Dealmoon) cause a
+    UnicodeEncodeError. We sanitise the Title header to ASCII (replacing
+    un-encodeable chars with '?') while preserving full Unicode in the body.
     """
     safe_title = title.encode("ascii", errors="replace").decode("ascii")
     try:
@@ -125,157 +138,213 @@ def _send_ntfy(title: str, body: str, priority: str = "default", tags: str = "")
         print(f"    ⚠️  ntfy send failed: {exc}")
 
 
-def notify_bogo_deal(brand: str, deal_title: str, description: str) -> None:
-    """Send a high-priority BOGO sale alert."""
+def notify_bogo_deal(brand: str, deal_title: str, description: str, deal_date: str) -> None:
+    """Send a high-priority BOGO deal alert."""
+    date_line = f"Posted: {deal_date}\n" if deal_date else ""
     _send_ntfy(
         title=f"🛍️ {brand} BOGO Sale on Dealmoon!",
-        body=f"{deal_title}\n\n{description}",
+        body=f"{deal_title}\n{date_line}\n{description}",
         priority="high",
         tags="rotating_light,lipstick,moneybag",
     )
     print("    ✅ BOGO alert sent via ntfy!")
 
 
-def notify_extraction_error(brand: str, reason: str) -> None:
-    """Send a warning alert when extraction fails after all retries."""
+def notify_extraction_error(brands: list[str]) -> None:
+    """Send a warning alert when all retries and the full-flow retry have failed."""
     _send_ntfy(
-        title="Deal Tracker — Extraction Error",
-        body=f"Failed to extract deals for: {brand}\n\nReason: {reason}",
+        title="Deal Tracker — Extraction Failed",
+        body=(
+            f"All extraction attempts failed for: {', '.join(brands)}\n\n"
+            "Both the initial attempts and the 2-hour retry flow were exhausted. "
+            "Will retry at the next scheduled daily run."
+        ),
         priority="default",
         tags="warning",
     )
-    print("    ⚠️  Error alert sent via ntfy!")
+    print("  ⚠️  Error alert sent via ntfy!")
 
 
-# ── Core Extraction Logic ──────────────────────────────────────────────────────
+# ── Core Extraction ────────────────────────────────────────────────────────────
+
+def _build_url(base_url: str, include_expired: bool) -> str:
+    """In INCLUDE_EXPIRED mode, swap expiredClick=n → y so Dealmoon serves expired deals."""
+    if include_expired:
+        return base_url.replace("expiredClick=n", "expiredClick=y")
+    return base_url
+
 
 def _extract_once(sgai: ScrapeGraphAI, url: str, include_expired: bool) -> dict | None:
     """
-    Attempt a single ScrapeGraphAI extraction on the given URL.
-    Returns the json_data dict on success, or None on failure.
+    Single ScrapeGraphAI extraction attempt on the given URL.
+    Returns the raw json_data dict on success, or None on any failure.
+    Uses defensive dict access — never trusts attribute access on ExtractResponse.
     """
     expired_instruction = (
         "Include both active and expired deals."
-        if include_expired
-        else "Only include active (non-expired) deals."
+        if include_expired else
+        "Only include active (non-expired) deals."
     )
     try:
         result = sgai.extract(
             url=url,
             schema=DealmoonSchema.model_json_schema(),
             prompt=(
-                f"Extract all deals listed on the page. For each deal, get the title, "
-                f"the full description, and whether it is marked as expired. {expired_instruction}"
+                "Extract all deals listed on the page. For each deal, capture: "
+                "(1) the title/headline, "
+                "(2) the full description including terms, promo codes, or gift details, "
+                "(3) the date the deal was posted or started — look for timestamps or date "
+                "labels near the deal entry (return as a string like 'May 30' or '2026-05-30', "
+                "or empty string if not visible), "
+                f"(4) whether it is marked as expired. {expired_instruction}"
             ),
             fetch_config=FetchConfig(mode="js", stealth=True, wait=4000),
         )
-        if result.status == "success":
-            data = result.data.json_data
-            if data and isinstance(data, dict):
-                return data
-            print(f"      ⚠️  Extraction succeeded but json_data is empty or malformed.")
+
+        # Defensive status check — never trust result.data without verifying status first
+        if result.status != "success":
+            print(f"      ⚠️  SDK error status: {result.error}")
             return None
-        else:
-            print(f"      ⚠️  SDK returned error status: {result.error}")
+
+        # Defensive dict access — ExtractResponse.json_data is the authoritative container
+        data = result.data.json_data
+        if not data or not isinstance(data, dict):
+            print("      ⚠️  Extraction succeeded but json_data is empty or malformed.")
             return None
+
+        return data
+
     except Exception as exc:
         print(f"      ⚠️  Exception during extraction: {exc}")
         return None
 
 
-def extract_deals(sgai: ScrapeGraphAI, brand: str, primary_url: str, fallback_url: str, include_expired: bool) -> list[dict] | None:
+def try_extract_brand(
+    sgai: ScrapeGraphAI,
+    brand_cfg: dict,
+    include_expired: bool,
+    label: str = "",
+) -> list[dict] | None:
     """
-    Attempt extraction with retry logic on the primary URL.
-    If all retries fail, fall back to the clean canonical URL.
-    Returns a list of raw deal dicts, or None if everything fails.
+    Attempt extraction for one brand up to MAX_RETRIES times on the primary URL.
+    No fallback URL — the official-store sid-filtered URLs are the only valid source.
+    Returns list of raw deal dicts, or None if all attempts fail.
     """
-    last_error: str = ""
+    brand = brand_cfg["brand"]
+    url   = _build_url(brand_cfg["url"], include_expired)
+    tag   = f" [{label}]" if label else ""
 
-    # ── Primary URL with retries ──────────────────────────────────────────────
+    print(f"\n→ {brand}{tag}")
+    print(f"  URL: {url}")
+
     for attempt in range(1, MAX_RETRIES + 1):
-        print(f"  Attempt {attempt}/{MAX_RETRIES} (primary URL)...")
-        data = _extract_once(sgai, primary_url, include_expired)
+        print(f"  Attempt {attempt}/{MAX_RETRIES}...")
+        data = _extract_once(sgai, url, include_expired)
         if data is not None:
             deals = data.get("deals", [])
-            print(f"  ✅ Extracted {len(deals)} deal(s) from primary URL.")
+            print(f"  ✅ {len(deals)} deal(s) extracted.")
             return deals
 
-        last_error = f"Attempt {attempt} failed on primary URL."
         if attempt < MAX_RETRIES:
             delay = RETRY_DELAYS[attempt - 1]
             print(f"  Waiting {delay}s before retry...")
             time.sleep(delay)
 
-    # ── Fallback URL (single attempt) ─────────────────────────────────────────
-    print(f"  🚨 All retries exhausted on primary URL. Falling back to clean URL...")
-    data = _extract_once(sgai, fallback_url, include_expired)
-    if data is not None:
-        deals = data.get("deals", [])
-        print(f"  ✅ Extracted {len(deals)} deal(s) from fallback URL.")
-        return deals
-
-    # Both primary and fallback failed
-    print(f"  ❌ Extraction failed on both primary and fallback URLs.")
-    notify_extraction_error(brand, f"All retries exhausted + fallback failed. Last: {last_error}")
+    print(f"  ❌ All {MAX_RETRIES} attempts failed for {brand}.")
     return None
 
 
-# ── Deal Checking ──────────────────────────────────────────────────────────────
+# ── Orchestration ──────────────────────────────────────────────────────────────
 
-def check_brand(sgai: ScrapeGraphAI, brand_cfg: dict, state: dict) -> bool:
+def run_extraction_flow(
+    sgai: ScrapeGraphAI,
+    active_brands: list[dict],
+    include_expired: bool,
+) -> dict[str, list[dict] | None]:
     """
-    Process one brand entry from deals_config.json.
-    Returns True if state was modified (a new alert was sent).
+    Full extraction flow with Lancome-priority retry logic:
+
+    1. Extract all brands in config order (Lancome first), each up to 3 attempts.
+    2. If Lancome failed AND at least one other brand succeeded → retry Lancome
+       up to 3 more times (Lancome has higher priority).
+    3. Return a dict: brand_name → deals list (or None on failure).
     """
-    brand        = brand_cfg["brand"]
-    primary_url  = brand_cfg["url"]
-    fallback_url = brand_cfg["fallback_url"]
-    keywords     = [kw.lower() for kw in brand_cfg.get("keywords", [])]
+    results: dict[str, list[dict] | None] = {}
 
-    print(f"\n→ {brand}")
-    print(f"  Primary URL:  {primary_url}")
-    print(f"  Fallback URL: {fallback_url}")
-    print(f"  Keywords:     {keywords}")
-    print(f"  Mode:         {'include expired (E2E test)' if INCLUDE_EXPIRED else 'active deals only'}")
+    # Step 1 — Extract all brands in config order
+    for brand_cfg in active_brands:
+        results[brand_cfg["brand"]] = try_extract_brand(sgai, brand_cfg, include_expired)
 
-    deals = extract_deals(sgai, brand, primary_url, fallback_url, INCLUDE_EXPIRED)
-    if deals is None:
-        return False
+    # Step 2 — Lancome-priority retry: if Lancome failed but another brand succeeded
+    lancome_cfg = next((b for b in active_brands if b["brand"] == "Lancome"), None)
+    if lancome_cfg and results.get("Lancome") is None:
+        other_succeeded = any(
+            v is not None for k, v in results.items() if k != "Lancome"
+        )
+        if other_succeeded:
+            print("\n  ↩️  Lancome failed but other brand(s) succeeded — retrying Lancome...")
+            results["Lancome"] = try_extract_brand(
+                sgai, lancome_cfg, include_expired, label="priority retry"
+            )
 
+    return results
+
+
+def process_results(
+    results: dict[str, list[dict] | None],
+    active_brands: list[dict],
+    state: dict,
+) -> bool:
+    """
+    Apply keyword filtering and send ntfy alerts for any new active BOGO matches.
+    Expired deals are only processed when INCLUDE_EXPIRED=True (E2E test mode).
+    Returns True if state was modified (i.e., at least one new alert was sent).
+    """
     state_modified = False
+    brand_map      = {b["brand"]: b for b in active_brands}
 
-    for deal in deals:
-        # Defensive parsing — use .get() to avoid KeyError on malformed entries
-        title       = deal.get("title", "").strip()
-        description = deal.get("description", "").strip()
-        is_expired  = deal.get("is_expired", False)
-
-        if not title:
+    for brand_name, deals in results.items():
+        if deals is None:
             continue
 
-        # Skip expired deals in normal daily runs
-        if is_expired and not INCLUDE_EXPIRED:
-            continue
+        brand_cfg = brand_map[brand_name]
+        keywords  = [kw.lower() for kw in brand_cfg.get("keywords", [])]
 
-        # Keyword match against title and description (case-insensitive)
-        combined  = f"{title} {description}".lower()
-        matched_kw = next((kw for kw in keywords if kw in combined), None)
-        if not matched_kw:
-            continue
+        print(f"\n  Processing {brand_name} ({len(deals)} deal(s))...")
 
-        print(f"\n  🎯 BOGO match! Keyword: '{matched_kw}'")
-        print(f"     Title:  {title}")
-        print(f"     Status: {'EXPIRED' if is_expired else 'ACTIVE'}")
+        for deal in deals:
+            # Defensive .get() access — never assume all schema fields are present
+            title      = deal.get("title", "").strip()
+            description = deal.get("description", "").strip()
+            deal_date  = deal.get("deal_date", "").strip()
+            is_expired = deal.get("is_expired", False)
 
-        # Deduplication check
-        if already_notified(state, title):
-            print(f"     ℹ️  Already notified — skipping duplicate alert.")
-            continue
+            if not title:
+                continue
 
-        # Send notification and record in state
-        notify_bogo_deal(brand, title, description)
-        mark_notified(state, title)
-        state_modified = True
+            # Skip expired deals in normal daily runs
+            if is_expired and not INCLUDE_EXPIRED:
+                continue
+
+            # Case-insensitive keyword match across title + description
+            combined   = f"{title} {description}".lower()
+            matched_kw = next((kw for kw in keywords if kw in combined), None)
+            if not matched_kw:
+                continue
+
+            status = "EXPIRED" if is_expired else "ACTIVE"
+            print(f"\n    🎯 BOGO match! Keyword: '{matched_kw}'")
+            print(f"       Title:  {title}")
+            print(f"       Date:   {deal_date or 'N/A'}")
+            print(f"       Status: {status}")
+
+            if already_notified(state, title):
+                print("       ℹ️  Already notified — skipping duplicate alert.")
+                continue
+
+            notify_bogo_deal(brand_name, title, description, deal_date)
+            mark_notified(state, title)
+            state_modified = True
 
     return state_modified
 
@@ -293,7 +362,7 @@ def main() -> None:
     if INCLUDE_EXPIRED:
         print("⚠️  Running in INCLUDE_EXPIRED mode — expired deals will be processed for E2E testing.\n")
 
-    # Load configuration
+    # Load brand configuration
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         all_brands = json.load(f)
 
@@ -302,26 +371,38 @@ def main() -> None:
         print("No active brands in deals_config.json. Nothing to check.")
         sys.exit(0)
 
-    print(f"🔍 Checking {len(active_brands)} active brand(s)...")
+    brand_names = [b["brand"] for b in active_brands]
+    print(f"🔍 Checking {len(active_brands)} brand(s): {', '.join(brand_names)}\n")
 
-    # Load persistent state
     state = load_state()
+    sgai  = ScrapeGraphAI(api_key=SGAI_API_KEY)
 
-    sgai = ScrapeGraphAI(api_key=SGAI_API_KEY)
-    state_modified = False
+    # ── First extraction flow ──────────────────────────────────────────────────
+    print("── Extraction flow (attempt 1) ──")
+    results = run_extraction_flow(sgai, active_brands, INCLUDE_EXPIRED)
 
-    for brand_cfg in active_brands:
-        modified = check_brand(sgai, brand_cfg, state)
-        if modified:
-            state_modified = True
-        print()
+    # ── Full-flow retry on total failure ───────────────────────────────────────
+    if all(v is None for v in results.values()):
+        wait_hours = FLOW_RETRY_WAIT // 3600
+        print(f"\n⏳ All brands failed on first flow. Retrying entire flow in {wait_hours}h...")
+        time.sleep(FLOW_RETRY_WAIT)
 
-    # Persist state only if something changed
+        print("\n── Extraction flow (attempt 2 — after retry wait) ──")
+        results = run_extraction_flow(sgai, active_brands, INCLUDE_EXPIRED)
+
+        if all(v is None for v in results.values()):
+            print("\n❌ Retry flow also failed. Sending error notification.")
+            notify_extraction_error(brand_names)
+            sys.exit(1)
+
+    # ── Process results — filter + alert ──────────────────────────────────────
+    state_modified = process_results(results, active_brands, state)
+
     if state_modified:
         save_state(state)
-        print("💾 State saved to deals_state.json.")
+        print("\n💾 State saved to deals_state.json.")
 
-    print("✅ All checks complete.")
+    print("\n✅ All checks complete.")
 
 
 if __name__ == "__main__":

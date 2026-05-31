@@ -1,15 +1,13 @@
 [
   {
-    "brand": "Clinique",
-    "url": "https://www.dealmoon.com/en/top/clinique?type=1&click=0&sort=relevance&expiredClick=n&exp=y&sid=184",
-    "fallback_url": "https://www.dealmoon.com/en/top/clinique",
+    "brand": "Lancome",
+    "url": "https://www.dealmoon.com/en/top/lancome?type=1&click=0&sort=relevance&expiredClick=n&exp=y&sid=968",
     "keywords": ["buy one get one", "bogo", "b1g1", "buy 1 get 1", "buy one, get one"],
     "active": true
   },
   {
-    "brand": "Lancome",
-    "url": "https://www.dealmoon.com/en/top/lancome?type=1&click=0&sort=relevance&expiredClick=n&exp=y&sid=968",
-    "fallback_url": "https://www.dealmoon.com/en/top/lancome",
+    "brand": "Clinique",
+    "url": "https://www.dealmoon.com/en/top/clinique?type=1&click=0&sort=relevance&expiredClick=n&exp=y&sid=184",
     "keywords": ["buy one get one", "bogo", "b1g1", "buy 1 get 1", "buy one, get one"],
     "active": true
   }
