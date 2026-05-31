@@ -154,17 +154,23 @@ def check_product(sgai: ScrapeGraphAI, product: dict) -> None:
             notify_extraction_error(name, result.error or "Unknown error")
             return
 
-        # result.data is a plain dict when schema is passed as a JSON schema dict
-        try:
-            parsed = MacBookProductSchema(**result.data)
-        except Exception as exc:
-            print(f"  ❌ Failed to parse extraction result: {exc}")
-            notify_extraction_error(name, f"Parse error: {exc}")
-            return
+        # result.data is an ExtractResponse object — access fields as attributes.
+        # Use a helper that also falls back to dict-key access in case the SDK
+        # returns a plain dict in a future version.
+        def _get(obj, key):
+            if isinstance(obj, dict):
+                return obj[key]
+            return getattr(obj, key)
 
-        price = parsed.current_price
-        product_title = parsed.product_title
-        stock_status = parsed.stock_status
+        try:
+            price = float(_get(result.data, "current_price"))
+            product_title = str(_get(result.data, "product_title"))
+            stock_status = str(_get(result.data, "stock_status"))
+        except Exception as exc:
+            print(f"  ❌ Failed to read extraction result fields: {exc}")
+            print(f"  Raw result.data: {result.data}")
+            notify_extraction_error(name, f"Field access error: {exc}")
+            return
 
         print(f"  Title:  {product_title}")
         print(f"  Stock:  {stock_status}")
