@@ -134,24 +134,44 @@ def check_product(sgai: ScrapeGraphAI, product: dict) -> None:
 
     # ── Live extraction mode ───────────────────────────────────────────────────
     else:
-        try:
-            result = sgai.extract(
-                url=url,
-                schema=MacBookProductSchema.model_json_schema(),  # SDK requires a dict, not a class
-                prompt=(
-                    "Extract the product title, the current retail price in USD as a plain "
-                    "float (no currency symbols, no commas), and the stock availability status."
-                ),
-                fetch_config=FetchConfig(mode="js", stealth=True, wait=2000),
-            )
-        except Exception as exc:
-            print(f"  ❌ Unexpected SDK error: {exc}")
-            notify_extraction_error(name, str(exc))
+        import time
+        MAX_RETRIES = 3
+        RETRY_DELAYS = [15, 30, 60]  # seconds between attempts
+        last_error: str = ""
+
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                result = sgai.extract(
+                    url=url,
+                    schema=MacBookProductSchema.model_json_schema(),  # SDK requires a dict, not a class
+                    prompt=(
+                        "Extract the product title, the current retail price in USD as a plain "
+                        "float (no currency symbols, no commas), and the stock availability status."
+                    ),
+                    fetch_config=FetchConfig(mode="js", stealth=True, wait=2000),
+                )
+                break  # success — exit retry loop
+            except Exception as exc:
+                last_error = str(exc)
+                if attempt < MAX_RETRIES:
+                    delay = RETRY_DELAYS[attempt - 1]
+                    print(f"  ⚠️  Attempt {attempt}/{MAX_RETRIES} failed ({exc}). Retrying in {delay}s...")
+                    time.sleep(delay)
+                else:
+                    print(f"  ❌ All {MAX_RETRIES} attempts failed. Last error: {exc}")
+                    notify_extraction_error(name, f"[attempt {attempt}/{MAX_RETRIES}] {last_error}")
+                    return
+        else:
+            # Loop completed without break (all retries failed via status check below)
+            notify_extraction_error(name, f"All retries exhausted: {last_error}")
             return
 
         if result.status == "error":
-            print(f"  ❌ Extraction failed: {result.error}")
-            notify_extraction_error(name, result.error or "Unknown error")
+            err = result.error or "Unknown error"
+            # Retry on 504 (transient timeout) — already retried above for exceptions,
+            # but status-level errors need the same treatment
+            print(f"  ❌ Extraction failed (status=error): {err}")
+            notify_extraction_error(name, err)
             return
 
         # ExtractResponse.json_data is the dict containing our extracted schema fields
