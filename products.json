@@ -1,0 +1,14 @@
+[
+  {
+    "name": "MacBook Pro M5 Silver 14\"",
+    "url": "https://www.bhphotovideo.com/c/product/1957138-REG/apple_mbp_m5p_32_14_macbook_pro_m5.html",
+    "threshold": 2700.00,
+    "active": true
+  },
+  {
+    "name": "MacBook Pro M5 Space Black 14\"",
+    "url": "https://www.bhphotovideo.com/c/product/1957137-REG/apple_mbp_m5p_31_14_macbook_pro_m5.html",
+    "threshold": 2700.00,
+    "active": true
+  }
+]

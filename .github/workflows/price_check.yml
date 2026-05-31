@@ -1,0 +1,39 @@
+name: B&H MacBook Price Check
+
+on:
+  # Runs every day at 09:00 UTC
+  schedule:
+    - cron: "0 9 * * *"
+
+  # Allows manual trigger from the GitHub Actions UI
+  # Use the price_override input to simulate a price drop and test notifications
+  workflow_dispatch:
+    inputs:
+      price_override:
+        description: "Simulate a price (e.g. 2499.00) to test alerts. Leave blank for a real live check."
+        required: false
+        default: ""
+
+jobs:
+  check-prices:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run price check
+        env:
+          SGAI_API_KEY: ${{ secrets.SGAI_API_KEY }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          # Only set when manually triggered with an override value
+          PRICE_OVERRIDE: ${{ inputs.price_override }}
+        run: python check_prices.py
