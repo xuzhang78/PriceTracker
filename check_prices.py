@@ -137,7 +137,7 @@ def check_product(sgai: ScrapeGraphAI, product: dict) -> None:
         try:
             result = sgai.extract(
                 url=url,
-                schema=MacBookProductSchema,
+                schema=MacBookProductSchema.model_json_schema(),  # SDK requires a dict, not a class
                 prompt=(
                     "Extract the product title, the current retail price in USD as a plain "
                     "float (no currency symbols, no commas), and the stock availability status."
@@ -154,9 +154,17 @@ def check_product(sgai: ScrapeGraphAI, product: dict) -> None:
             notify_extraction_error(name, result.error or "Unknown error")
             return
 
-        price = result.data.current_price
-        product_title = result.data.product_title
-        stock_status = result.data.stock_status
+        # result.data is a plain dict when schema is passed as a JSON schema dict
+        try:
+            parsed = MacBookProductSchema(**result.data)
+        except Exception as exc:
+            print(f"  ❌ Failed to parse extraction result: {exc}")
+            notify_extraction_error(name, f"Parse error: {exc}")
+            return
+
+        price = parsed.current_price
+        product_title = parsed.product_title
+        stock_status = parsed.stock_status
 
         print(f"  Title:  {product_title}")
         print(f"  Stock:  {stock_status}")
