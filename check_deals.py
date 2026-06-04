@@ -314,10 +314,18 @@ def process_results(
 
         for deal in deals:
             # Defensive .get() access — never assume all schema fields are present
-            title      = deal.get("title", "").strip()
+            title       = deal.get("title", "").strip()
             description = deal.get("description", "").strip()
-            deal_date  = deal.get("deal_date", "").strip()
-            is_expired = deal.get("is_expired", False)
+            deal_date   = deal.get("deal_date", "").strip()
+
+            # Dual expired check: AI field AND title prefix.
+            # Dealmoon always prefixes expired deal titles with "[Expired]" on the
+            # server side. This is a reliable marker that does not depend on AI
+            # classification accuracy. Using both catches cases where the AI
+            # incorrectly returns is_expired=False for a visibly expired deal.
+            ai_expired    = deal.get("is_expired", False)
+            title_expired = title.lower().startswith("[expired]")
+            is_expired    = ai_expired or title_expired
 
             if not title:
                 continue
