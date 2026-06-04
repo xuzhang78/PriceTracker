@@ -396,7 +396,30 @@ ERROR: Ignored the following versions that require a different python version:
 
 ---
 
+### v2.1 → v2.2: False-Positive Expired Deal Alert Fix
+
+**Date:** June 4, 2026 (reported from daily production run)
+
+**Symptom:** User received a push notification for an expired Clinique BOGO deal during a normal daily run (no `INCLUDE_EXPIRED`).
+
+**Root cause:** `process_results()` determined expired status solely from the AI-returned `is_expired` field. ScrapeGraphAI occasionally misclassifies an expired deal as `is_expired=False` (AI hallucination), causing it to pass the filter and trigger a false alert.
+
+**Fix:** Added a second, server-side signal — the `[Expired]` title prefix. Dealmoon always prepends `[Expired]` to expired deal titles at the server level, making it a reliable indicator independent of AI accuracy:
+```python
+# Before (single source — AI can hallucinate)
+is_expired = deal.get("is_expired", False)
+
+# After (dual check — either signal is sufficient)
+ai_expired    = deal.get("is_expired", False)
+title_expired = title.lower().startswith("[expired]")
+is_expired    = ai_expired or title_expired
+```
+Also removed a leftover `[DEBUG]` print statement from `process_results()`.
+
+---
+
 ### v1 → v1.1: `UnicodeEncodeError` Bug Fix
+
 
 
 **Date:** May 31, 2026 (during initial local testing)
