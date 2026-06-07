@@ -418,7 +418,38 @@ Also removed a leftover `[DEBUG]` print statement from `process_results()`.
 
 ---
 
+### v2.2 → v2.3: Expired Deals Served Server-Side via `exp=y` URL Parameter
+
+**Date:** June 6, 2026 (reported from daily production run — same symptom as v2.2)
+
+**Symptom:** User again received a push notification for an expired Clinique BOGO deal despite the v2.2 `[Expired]` title-prefix fix.
+
+**Root cause (deeper):** The v2.2 fix addressed AI misclassification, but the **deeper root cause was never fixed**: the config URLs contain `exp=y`, which is the **server-side** Dealmoon parameter that instructs the server to include expired deals in the page response. The previous `_build_url()` fix only swapped `expiredClick=n → y` (a UI toggle), which had **no effect** on what the server actually returned. So every daily run was receiving a page with both active and expired deals mixed together, relying entirely on the AI to classify them correctly — which it occasionally could not.
+
+Additionally, **Lancome was found with `"active": false`** in `deals_config.json`, meaning it was silently not being tracked.
+
+**Fix 1 — URL parameter (root cause):** `_build_url()` now correctly handles `exp`:
+```python
+# Before: only swapped expiredClick (UI toggle — no effect on server response)
+if include_expired:
+    return base_url.replace("expiredClick=n", "expiredClick=y")
+return base_url   # ← exp=y remained! Server still sent expired deals.
+
+# After: in normal daily runs, force exp=n at the server level
+if include_expired:
+    return base_url.replace("expiredClick=n", "expiredClick=y")  # exp=y kept
+else:
+    return base_url.replace("exp=y", "exp=n")  # server excludes expired deals
+```
+
+**Fix 2 — Lancome restored:** `deals_config.json` Lancome entry restored to `"active": true`.
+
+**Defense in depth:** The `[Expired]` title-prefix check from v2.2 is retained as a safety net in case the server still occasionally leaks an expired deal through.
+
+---
+
 ### v1 → v1.1: `UnicodeEncodeError` Bug Fix
+
 
 
 
