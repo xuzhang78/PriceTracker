@@ -168,10 +168,24 @@ def notify_extraction_error(brands: list[str]) -> None:
 # ── Core Extraction ────────────────────────────────────────────────────────────
 
 def _build_url(base_url: str, include_expired: bool) -> str:
-    """In INCLUDE_EXPIRED mode, swap expiredClick=n → y so Dealmoon serves expired deals."""
+    """
+    Build the URL to scrape, controlling whether Dealmoon serves expired deals.
+
+    The config URLs contain exp=y which is the SERVER-SIDE parameter that tells
+    Dealmoon to include expired deals in the page response (independent of the
+    expiredClick UI-toggle). In normal daily runs we force exp=n so the server
+    only returns active deals — eliminating expired content before it even
+    reaches the AI, rather than relying solely on AI classification.
+
+    In INCLUDE_EXPIRED (E2E test) mode we keep exp=y and also flip expiredClick
+    to ensure all historical expired deals are served for pipeline verification.
+    """
     if include_expired:
+        # E2E test: serve active + expired deals
         return base_url.replace("expiredClick=n", "expiredClick=y")
-    return base_url
+    else:
+        # Normal daily run: force server-side exclusion of expired deals
+        return base_url.replace("exp=y", "exp=n")
 
 
 def _extract_once(sgai: ScrapeGraphAI, url: str, include_expired: bool) -> dict | None:
