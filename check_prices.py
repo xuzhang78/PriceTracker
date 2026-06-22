@@ -220,33 +220,20 @@ def _extract_price_once(provider: str, client, url: str) -> dict | None:
             return None
         return json_data
     else:
-        result = client.extract(
-            urls=[url],
-            prompt=_PRICE_PROMPT,
-            schema=MacBookProductSchema.model_json_schema(),
+        doc = client.scrape(
+            url,
+            formats=[
+                {
+                    "type": "json",
+                    "schema": MacBookProductSchema.model_json_schema(),
+                    "prompt": _PRICE_PROMPT
+                }
+            ]
         )
-        # Defensive: handle multiple possible response formats
-        candidates = []
-        if isinstance(result, dict):
-            candidates.append(result)
-            if "data" in result:
-                d = result["data"]
-                candidates.append(d) if isinstance(d, dict) else None
-                if isinstance(d, list) and d:
-                    candidates.append(d[0])
-        if hasattr(result, "data"):
-            d = result.data
-            if isinstance(d, dict):
-                candidates.append(d)
-            elif isinstance(d, list) and d:
-                candidates.append(d[0])
-
-        for c in candidates:
-            if isinstance(c, dict) and "current_price" in c:
-                return c
-
-        print(f"      ⚠️  Firecrawl: unrecognised response format.")
-        print(f"      Raw: {str(result)[:300]}")
+        if hasattr(doc, "json") and doc.json is not None:
+            if isinstance(doc.json, dict) and "current_price" in doc.json:
+                return doc.json
+        print("      ⚠️  Firecrawl: 'json' field empty or malformed.")
         return None
 
 
@@ -313,9 +300,12 @@ def extract_product_data(provider: str, client, product: dict) -> dict | None:
     if res is not None:
         return res
 
-    # Try secondary provider fallback
-    secondary_provider = "firecrawl" if provider == "sgai" else "sgai"
-    secondary_key = FIRECRAWL_API_KEY if secondary_provider == "firecrawl" else SGAI_API_KEY
+    # Only allow fallback from SGAI to Firecrawl. If primary is Firecrawl, do not fallback to SGAI.
+    if provider == "firecrawl":
+        return None
+
+    secondary_provider = "firecrawl"
+    secondary_key = FIRECRAWL_API_KEY
 
     if secondary_key:
         print(f"\n🔄 Primary [{provider.upper()}] failed for {name}. Falling back to [{secondary_provider.upper()}]...")

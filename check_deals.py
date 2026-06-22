@@ -301,33 +301,20 @@ def _extract_once_firecrawl(client, url: str, include_expired: bool) -> dict | N
         else "Only include active (non-expired) deals."
     )
     try:
-        result = client.extract(
-            urls=[url],
-            prompt=_EXTRACTION_PROMPT.format(expired_instruction=expired_instruction),
-            schema=DealmoonSchema.model_json_schema(),
+        doc = client.scrape(
+            url,
+            formats=[
+                {
+                    "type": "json",
+                    "schema": DealmoonSchema.model_json_schema(),
+                    "prompt": _EXTRACTION_PROMPT.format(expired_instruction=expired_instruction)
+                }
+            ]
         )
-        # Defensive: handle multiple possible response formats
-        candidates = []
-        if isinstance(result, dict):
-            candidates.append(result)
-            if "data" in result:
-                d = result["data"]
-                candidates.append(d) if isinstance(d, dict) else None
-                if isinstance(d, list) and d:
-                    candidates.append(d[0])
-        if hasattr(result, "data"):
-            d = result.data
-            if isinstance(d, dict):
-                candidates.append(d)
-            elif isinstance(d, list) and d:
-                candidates.append(d[0])
-
-        for c in candidates:
-            if isinstance(c, dict) and "deals" in c:
-                return c
-
-        print(f"      ⚠️  Firecrawl: unrecognised response format.")
-        print(f"      Raw: {str(result)[:300]}")
+        if hasattr(doc, "json") and doc.json is not None:
+            if isinstance(doc.json, dict) and "deals" in doc.json:
+                return doc.json
+        print("      ⚠️  Firecrawl: 'json' field empty or malformed.")
         return None
     except Exception as exc:
         print(f"      ⚠️  Firecrawl exception: {exc}")
@@ -394,8 +381,12 @@ def try_extract_brand_with_fallback(
     if res is not None:
         return res
 
-    secondary_provider = "firecrawl" if primary_provider == "sgai" else "sgai"
-    secondary_key = FIRECRAWL_API_KEY if secondary_provider == "firecrawl" else SGAI_API_KEY
+    # Only allow fallback from SGAI to Firecrawl. If primary is Firecrawl, do not fallback to SGAI.
+    if primary_provider == "firecrawl":
+        return None
+
+    secondary_provider = "firecrawl"
+    secondary_key = FIRECRAWL_API_KEY
 
     if secondary_key:
         print(f"\n🔄 Primary [{primary_provider.upper()}] failed for {brand}. Falling back to [{secondary_provider.upper()}]...")
