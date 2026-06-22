@@ -2,12 +2,12 @@ name: Price & Deal Tracker
 
 on:
   # Runs daily at 10:00 UTC (6:00 AM EDT).
-  # Each tracker type is only executed if it has at least one active entry
-  # in tracker_config.json — no wasted runner minutes otherwise.
+  # All tracker jobs start simultaneously. Each job gates itself — if it has
+  # nothing active in tracker_config.json, it exits after checkout with no cost.
   schedule:
     - cron: "0 10 * * *"
 
-  # Manual trigger — supports isolated testing of each tracker.
+  # Manual trigger — use run_tracker to target a specific subagent job.
   workflow_dispatch:
     inputs:
       run_tracker:
@@ -29,52 +29,52 @@ on:
         required: false
         default: ""
 
+# ── Subagent: Dealmoon BOGO ────────────────────────────────────────────────────
 jobs:
-  run-trackers:
+  dealmoon:
+    name: "Dealmoon BOGO Check"
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v5
 
-      - name: Check for active trackers
-        id: check_active
+      - name: Gate — skip if not targeted or no active brands
+        id: gate
         run: |
           override="${{ inputs.run_tracker || 'auto' }}"
 
+          if [ "$override" = "bh" ]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+            echo "⏭️  Skipped — run_tracker=bh"
+            exit 0
+          fi
+
           if [ "$override" = "dealmoon" ] || [ "$override" = "both" ]; then
-            dm_flag=true
-          elif [ "$override" = "bh" ]; then
-            dm_flag=false
-          else
-            # auto: respect active flags in tracker_config.json
-            count=$(jq '[.trackers[] | select(.type == "dealmoon_bogo" and .active == true)] | length' tracker_config.json)
-            [ "$count" -gt 0 ] && dm_flag=true || dm_flag=false
+            echo "skip=false" >> $GITHUB_OUTPUT
+            echo "✅ Targeted by run_tracker=$override"
+            exit 0
           fi
 
-          if [ "$override" = "bh" ] || [ "$override" = "both" ]; then
-            bh_flag=true
-          elif [ "$override" = "dealmoon" ]; then
-            bh_flag=false
+          count=$(jq '[.trackers[] | select(.type == "dealmoon_bogo" and .active == true)] | length' tracker_config.json)
+          if [ "$count" -gt 0 ]; then
+            echo "skip=false" >> $GITHUB_OUTPUT
+            echo "✅ $count active Dealmoon brand(s) found — proceeding"
           else
-            count=$(jq '[.trackers[] | select(.type == "bh_price" and .active == true)] | length' tracker_config.json)
-            [ "$count" -gt 0 ] && bh_flag=true || bh_flag=false
+            echo "skip=true" >> $GITHUB_OUTPUT
+            echo "⏭️  No active dealmoon_bogo entries — skipping"
           fi
-
-          echo "dealmoon_active=$dm_flag" >> $GITHUB_OUTPUT
-          echo "bh_active=$bh_flag"       >> $GITHUB_OUTPUT
-          echo "run_tracker=$override | dealmoon=$dm_flag | bh=$bh_flag"
 
       - uses: actions/setup-python@v6
-        if: steps.check_active.outputs.dealmoon_active == 'true' || steps.check_active.outputs.bh_active == 'true'
+        if: steps.gate.outputs.skip != 'true'
         with:
           python-version: "3.12"
 
       - name: Install dependencies
-        if: steps.check_active.outputs.dealmoon_active == 'true' || steps.check_active.outputs.bh_active == 'true'
+        if: steps.gate.outputs.skip != 'true'
         run: pip install -r requirements.txt
 
       - name: Run Dealmoon BOGO check
-        if: steps.check_active.outputs.dealmoon_active == 'true'
+        if: steps.gate.outputs.skip != 'true'
         env:
           SGAI_API_KEY:      ${{ secrets.SGAI_API_KEY }}
           FIRECRAWL_API_KEY: ${{ secrets.FIRECRAWL_API_KEY }}
@@ -82,8 +82,51 @@ jobs:
           INCLUDE_EXPIRED:   ${{ inputs.include_expired || 'false' }}
         run: python check_deals.py
 
+# ── Subagent: B&H Price Check ──────────────────────────────────────────────────
+  bh-prices:
+    name: "B&H Price Check"
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Gate — skip if not targeted or no active products
+        id: gate
+        run: |
+          override="${{ inputs.run_tracker || 'auto' }}"
+
+          if [ "$override" = "dealmoon" ]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+            echo "⏭️  Skipped — run_tracker=dealmoon"
+            exit 0
+          fi
+
+          if [ "$override" = "bh" ] || [ "$override" = "both" ]; then
+            echo "skip=false" >> $GITHUB_OUTPUT
+            echo "✅ Targeted by run_tracker=$override"
+            exit 0
+          fi
+
+          count=$(jq '[.trackers[] | select(.type == "bh_price" and .active == true)] | length' tracker_config.json)
+          if [ "$count" -gt 0 ]; then
+            echo "skip=false" >> $GITHUB_OUTPUT
+            echo "✅ $count active B&H product(s) found — proceeding"
+          else
+            echo "skip=true" >> $GITHUB_OUTPUT
+            echo "⏭️  No active bh_price entries — skipping"
+          fi
+
+      - uses: actions/setup-python@v6
+        if: steps.gate.outputs.skip != 'true'
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        if: steps.gate.outputs.skip != 'true'
+        run: pip install -r requirements.txt
+
       - name: Run B&H price check
-        if: steps.check_active.outputs.bh_active == 'true'
+        if: steps.gate.outputs.skip != 'true'
         env:
           SGAI_API_KEY:   ${{ secrets.SGAI_API_KEY }}
           NTFY_TOPIC:     ${{ secrets.NTFY_TOPIC }}
