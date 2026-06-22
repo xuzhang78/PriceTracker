@@ -149,6 +149,7 @@ Brand configurations are in [`tracker_config.json`](./tracker_config.json). No c
 ### Pause a brand
 ```json
 {
+  "type": "dealmoon_bogo",
   "brand": "Clinique",
   ...
   "active": false
@@ -176,17 +177,23 @@ Products are configured in [`tracker_config.json`](./tracker_config.json).
 
 ## Credit Usage
 
-| Tracker | Schedule | Cost per Run | Credits/month |
-|---|---|---|---|
-| BOGO Tracker (2 brands) | Daily | 10 (SGAI) / 5 (Firecrawl) per brand | ~300 - 600 |
-| MacBook Tracker (2 products) | Daily | 1 per HTML scrape (SGAI or Firecrawl) | ~60 |
-| **Total** | | | **~360 - 660** |
+Thanks to **Optimizations A & B**, our daily checks are highly cost-efficient:
 
-### Guidelines & Overage Prevention
-- **HTML-Only Scraping**: The MacBook Price Tracker retrieves raw HTML (1 credit) and parses the page using stable regex tags. If the regex parsing fails, it automatically falls back to LLM structured extraction.
-- **Dynamic Retry Limit**: In testing/E2E modes (`IS_TEST` is true), retry attempts are capped at `1` to prevent runaway credit usage on scraping failures.
-- **Testing Credit Preservation**: Limit the use of full scraper test runs to manual/essential verifications. For downstream pipeline testing (such as notifications), use simulation overrides (e.g. `PRICE_OVERRIDE=2499.00 python check_prices.py`) which bypasses external scraping APIs completely.
-- **SGAI & Firecrawl Fallback**: If SGAI credits are depleted, the tracker automatically falls back to Firecrawl. Make sure both `SGAI_API_KEY` and `FIRECRAWL_API_KEY` are configured.
+* **BOGO Tracker**: Uses structured JSON extraction (5 credits per request on Firecrawl fallback). Checking 2 brands daily consumes $2 \times 5 = 10$ credits/day.
+* **MacBook Price Tracker**: Uses HTML-only scraping and regex parsing (1 credit per request on Firecrawl/SGAI). Checking 2 products daily consumes $2 \times 1 = 2$ credits/day.
+
+| Tracker | Schedule | Requests/month | Credits/month |
+|---|---|---|---|
+| BOGO Tracker (2 brands) | Daily | 60 | 300 |
+| MacBook Tracker (2 models) | Daily | 60 | 60 |
+| **Total** | | **120** | **360** |
+
+This total of **360 credits/month** fits comfortably within the **500 free credits/month** plan.
+
+### Optimization Highlights
+1. **B&H HTML Scraping**: The MacBook tracker queries Firecrawl or SGAI in html-only mode (1 credit instead of 5-10 credits) and parses data using regex, falling back to LLM structured extraction only on failure.
+2. **Capped Testing Retries (Optimization A)**: In test modes, retries are capped at `1` instead of `3` to prevent credit burn during failure debugging.
+3. **Smart Pagination**: Dealmoon crawls subsequent pages (up to page 3) only during testing mode when looking for historical BOGO matches. Daily production runs check page 1 only.
 
 ---
 
