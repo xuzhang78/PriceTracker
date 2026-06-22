@@ -34,8 +34,10 @@ Testing mode (E2E via GitHub Actions only — preserves credits):
   INCLUDE_EXPIRED=true: uses baseline URL (all deals) for pipeline verification.
 """
 
+import datetime
 import json
 import os
+import re
 import sys
 import time
 
@@ -84,6 +86,9 @@ class Deal(BaseModel):
     )
     is_expired:  bool = Field(
         description="True if the deal is explicitly marked as expired on the page"
+    )
+    deal_url:    str  = Field(
+        description="The URL link of the deal page (e.g. 'https://www.dealmoon.com/en/.../5881094.html')"
     )
 
 
@@ -263,8 +268,44 @@ _EXTRACTION_PROMPT = (
     "(3) the date the deal was posted or started — look for timestamps or date "
     "labels near the deal entry (return as a string like 'May 30' or '2026-05-30', "
     "or empty string if not visible), "
-    "(4) whether it is marked as expired. {expired_instruction}"
+    "(4) whether it is marked as expired, "
+    "(5) the URL link of the deal page (e.g. 'https://www.dealmoon.com/en/.../5881094.html'). "
+    "{expired_instruction} Extract ALL deals listed on the page from top to bottom. "
+    "Do not skip or truncate any deals."
 )
+
+
+def parse_dates_from_html(html: str) -> dict[str, str]:
+    """
+    Parses deal Unix timestamps from raw HTML and maps deal IDs to formatted date strings.
+    """
+    deal_times = {}
+    if not html:
+        return deal_times
+    deal_blocks = html.split('<div class="mlist')
+    for block in deal_blocks[1:]:
+        header = block[:1000]
+        id_match = re.search(r'data-id="(\d+)"', header)
+        t_match = re.search(r'\bt="(\d+)"', header)
+        if id_match and t_match:
+            deal_id = id_match.group(1)
+            timestamp = int(t_match.group(1))
+            try:
+                dt = datetime.datetime.fromtimestamp(timestamp)
+                deal_times[deal_id] = dt.strftime("%b %d, %Y")
+            except Exception:
+                pass
+        else:
+            id_match_alt = re.search(r'id="deal(\d+)"', header)
+            if id_match_alt and t_match:
+                deal_id = id_match_alt.group(1)
+                timestamp = int(t_match.group(1))
+                try:
+                    dt = datetime.datetime.fromtimestamp(timestamp)
+                    deal_times[deal_id] = dt.strftime("%b %d, %Y")
+                except Exception:
+                    pass
+    return deal_times
 
 
 def _extract_once_sgai(client, url: str, include_expired: bool) -> dict | None:
@@ -304,6 +345,7 @@ def _extract_once_firecrawl(client, url: str, include_expired: bool) -> dict | N
         doc = client.scrape(
             url,
             formats=[
+                "html",
                 {
                     "type": "json",
                     "schema": DealmoonSchema.model_json_schema(),
@@ -313,7 +355,10 @@ def _extract_once_firecrawl(client, url: str, include_expired: bool) -> dict | N
         )
         if hasattr(doc, "json") and doc.json is not None:
             if isinstance(doc.json, dict) and "deals" in doc.json:
-                return doc.json
+                result_json = doc.json
+                if hasattr(doc, "html") and doc.html:
+                    result_json["_html"] = doc.html
+                return result_json
         print("      ⚠️  Firecrawl: 'json' field empty or malformed.")
         return None
     except Exception as exc:
@@ -354,6 +399,23 @@ def try_extract_brand(
         data = _extract_once(provider, client, url, include_expired)
         if data is not None:
             deals = data.get("deals", [])
+            
+            # Map Unix timestamps from HTML to the extracted deals via URL deal IDs
+            html_content = data.get("_html")
+            if html_content:
+                deal_times = parse_dates_from_html(html_content)
+                mapped_count = 0
+                for deal in deals:
+                    url_str = deal.get("deal_url", "")
+                    id_match = re.search(r'/(\d+)\.html', url_str)
+                    if id_match:
+                        deal_id = id_match.group(1)
+                        if deal_id in deal_times:
+                            deal["deal_date"] = deal_times[deal_id]
+                            mapped_count += 1
+                if mapped_count > 0:
+                    print(f"  🎯 Mapped exact dates for {mapped_count}/{len(deals)} deals using HTML timestamps.")
+            
             print(f"  ✅ {len(deals)} deal(s) extracted.")
             return deals
         if attempt < MAX_RETRIES:
@@ -410,6 +472,67 @@ def try_extract_brand_with_fallback(
     return None
 
 
+def count_bogo_matches(deals: list[dict], keywords: list[str]) -> int:
+    """Helper to count the number of BOGO matches (active or expired) in a list of deals."""
+    if not deals:
+        return 0
+    count = 0
+    for deal in deals:
+        title = deal.get("title", "").strip()
+        description = deal.get("description", "").strip()
+        combined = f"{title} {description}".lower()
+        if any(kw in combined for kw in keywords):
+            count += 1
+    return count
+
+
+def extract_brand_with_pagination(
+    provider: str,
+    client,
+    brand_cfg: dict,
+    include_expired: bool,
+    label: str = "",
+) -> list[dict] | None:
+    """
+    Fetch page 1 for a brand, and if running in testing mode and no BOGO match
+    is found, dynamically fetch subsequent pages (up to page 3).
+    """
+    deals = try_extract_brand_with_fallback(provider, client, brand_cfg, include_expired, label)
+    if deals is None:
+        return None
+
+    if include_expired:
+        keywords = [kw.lower() for kw in brand_cfg.get("keywords", [])]
+        bogo_count = count_bogo_matches(deals, keywords)
+        print(f"  🔍 Page 1: Found {bogo_count} BOGO match(es) for {brand_cfg['brand']}.")
+        
+        current_page = 1
+        max_pages = 3
+        while bogo_count == 0 and current_page < max_pages:
+            current_page += 1
+            print(f"  ⚠️ No BOGO match on page {current_page-1} for {brand_cfg['brand']}. Fetching page {current_page}...")
+            
+            paginated_cfg = brand_cfg.copy()
+            base_url = brand_cfg["url"]
+            separator = "&" if "?" in base_url else "?"
+            paginated_cfg["url"] = f"{base_url}{separator}p={current_page}"
+            
+            lbl = f"{label} page {current_page}".strip()
+            page_deals = try_extract_brand_with_fallback(
+                provider, client, paginated_cfg, include_expired, label=lbl
+            )
+            if page_deals:
+                deals.extend(page_deals)
+                new_matches = count_bogo_matches(page_deals, keywords)
+                bogo_count += new_matches
+                print(f"  🔍 Page {current_page}: Found {new_matches} BOGO match(es) (Total BOGO: {bogo_count}).")
+            else:
+                print(f"  ⚠️ Failed to extract page {current_page} or page was empty.")
+                break
+                
+    return deals
+
+
 # ── Orchestration ──────────────────────────────────────────────────────────────
 
 def run_extraction_flow(
@@ -427,7 +550,7 @@ def run_extraction_flow(
     results: dict[str, list[dict] | None] = {}
 
     for brand_cfg in active_brands:
-        results[brand_cfg["brand"]] = try_extract_brand_with_fallback(
+        results[brand_cfg["brand"]] = extract_brand_with_pagination(
             provider, client, brand_cfg, include_expired
         )
 
@@ -437,7 +560,7 @@ def run_extraction_flow(
         other_succeeded = any(v is not None for k, v in results.items() if k != "Lancome")
         if other_succeeded:
             print("\n  ↩️  Lancome failed but other brand(s) succeeded — retrying Lancome...")
-            results["Lancome"] = try_extract_brand_with_fallback(
+            results["Lancome"] = extract_brand_with_pagination(
                 provider, client, lancome_cfg, include_expired, label="priority retry"
             )
 
