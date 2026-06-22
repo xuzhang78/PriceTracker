@@ -167,15 +167,23 @@ def _check_sgai_credits() -> int:
     try:
         from scrapegraph_py import ScrapeGraphAI
         sgai = ScrapeGraphAI(api_key=SGAI_API_KEY)
-        info = sgai.get_credits()
+        info = sgai.credits()
+        # Handle nested data attribute first (new SDK format)
+        if hasattr(info, "data") and info.data is not None:
+            d = info.data
+            for field in ("remaining", "remaining_credits", "credits", "balance"):
+                if hasattr(d, field):
+                    return int(getattr(d, field))
+                if isinstance(d, dict) and field in d:
+                    return int(d[field])
         # Handle multiple possible response formats across SDK versions
         if isinstance(info, (int, float)):
             return int(info)
         if isinstance(info, dict):
-            for field in ("remaining_credits", "credits", "remaining", "balance"):
+            for field in ("remaining", "remaining_credits", "credits", "balance"):
                 if field in info:
                     return int(info[field])
-        for attr in ("remaining_credits", "credits", "remaining", "balance"):
+        for attr in ("remaining", "remaining_credits", "credits", "balance"):
             if hasattr(info, attr):
                 return int(getattr(info, attr))
         print(f"  ⚠️  Unrecognised SGAI credits response: {info}")
@@ -364,7 +372,48 @@ def try_extract_brand(
             print(f"  Waiting {delay}s before retry...")
             time.sleep(delay)
 
-    print(f"  ❌ All {MAX_RETRIES} attempts failed for {brand}.")
+    print(f"  ❌ All {MAX_RETRIES} attempts failed for {brand} via {provider.upper()}.")
+    return None
+
+
+def try_extract_brand_with_fallback(
+    primary_provider: str,
+    primary_client,
+    brand_cfg: dict,
+    include_expired: bool,
+    label: str = "",
+) -> list[dict] | None:
+    """
+    Tries to extract brand using primary provider, and dynamically falls back
+    to secondary provider (if configured) if the primary fails.
+    """
+    brand = brand_cfg["brand"]
+    res = try_extract_brand(primary_provider, primary_client, brand_cfg, include_expired, label)
+    if res is not None:
+        return res
+
+    secondary_provider = "firecrawl" if primary_provider == "sgai" else "sgai"
+    secondary_key = FIRECRAWL_API_KEY if secondary_provider == "firecrawl" else SGAI_API_KEY
+
+    if secondary_key:
+        print(f"\n🔄 Primary [{primary_provider.upper()}] failed for {brand}. Falling back to [{secondary_provider.upper()}]...")
+        try:
+            if secondary_provider == "firecrawl":
+                from firecrawl import FirecrawlApp
+                sec_client = FirecrawlApp(api_key=FIRECRAWL_API_KEY)
+            else:
+                from scrapegraph_py import ScrapeGraphAI
+                sec_client = ScrapeGraphAI(api_key=SGAI_API_KEY)
+
+            res = try_extract_brand(
+                secondary_provider, sec_client, brand_cfg, include_expired,
+                f"{label} fallback".strip()
+            )
+            if res is not None:
+                return res
+        except Exception as exc:
+            print(f"  ⚠️  Failed to initialize or extract via fallback provider {secondary_provider.upper()}: {exc}")
+
     return None
 
 
@@ -385,7 +434,7 @@ def run_extraction_flow(
     results: dict[str, list[dict] | None] = {}
 
     for brand_cfg in active_brands:
-        results[brand_cfg["brand"]] = try_extract_brand(
+        results[brand_cfg["brand"]] = try_extract_brand_with_fallback(
             provider, client, brand_cfg, include_expired
         )
 
@@ -395,7 +444,7 @@ def run_extraction_flow(
         other_succeeded = any(v is not None for k, v in results.items() if k != "Lancome")
         if other_succeeded:
             print("\n  ↩️  Lancome failed but other brand(s) succeeded — retrying Lancome...")
-            results["Lancome"] = try_extract_brand(
+            results["Lancome"] = try_extract_brand_with_fallback(
                 provider, client, lancome_cfg, include_expired, label="priority retry"
             )
 

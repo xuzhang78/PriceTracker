@@ -1,19 +1,28 @@
 """
 B&H Photo MacBook Pro M5 Price Tracker
 ---------------------------------------
-Reads products.json, uses ScrapeGraphAI to AI-extract prices,
-and sends an ntfy.sh push notification when price drops below threshold.
+Reads tracker_config.json (type: bh_price), uses AI extraction to get the
+current price, and sends an ntfy.sh push notification when price drops below
+the configured threshold.
 
-Usage:
+Extraction provider selection (automatic):
+  1. Check SGAI credit balance. If credits >= cost of one full run (10 per
+     product), use ScrapeGraphAI.
+  2. If SGAI credits are exhausted or below threshold, fall back to Firecrawl.
+
+Run modes:
   Normal run:       python check_prices.py
+  Report mode:      REPORT_MODE=true python check_prices.py
+                    → real extraction, always notify with actual price
   Simulate alert:   PRICE_OVERRIDE=2499.00 python check_prices.py
+                    → skips real extraction, tests notification pipeline
 """
 
 import json
 import os
 import sys
+import time
 
-# Force UTF-8 output so emoji print correctly on Windows terminals
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 if hasattr(sys.stderr, "reconfigure"):
@@ -22,45 +31,47 @@ if hasattr(sys.stderr, "reconfigure"):
 import requests
 from dotenv import load_dotenv
 from pydantic import BaseModel
-from scrapegraph_py import FetchConfig, ScrapeGraphAI
 
 # ── Configuration ──────────────────────────────────────────────────────────────
 
 load_dotenv()
 
-SGAI_API_KEY = os.getenv("SGAI_API_KEY", "")
-NTFY_TOPIC = os.getenv("NTFY_TOPIC", "")
+SGAI_API_KEY        = os.getenv("SGAI_API_KEY", "")
+FIRECRAWL_API_KEY   = os.getenv("FIRECRAWL_API_KEY", "")
+NTFY_TOPIC          = os.getenv("NTFY_TOPIC", "")
 _price_override_raw = os.getenv("PRICE_OVERRIDE", "").strip()
 PRICE_OVERRIDE: float | None = float(_price_override_raw) if _price_override_raw else None
-REPORT_MODE = os.getenv("REPORT_MODE", "false").strip().lower() == "true"
+REPORT_MODE         = os.getenv("REPORT_MODE", "false").strip().lower() == "true"
+
+SGAI_CREDITS_PER_CALL = 10       # credits consumed per SGAI extract call
 
 # Prices outside this range indicate a failed / blocked extraction
 MIN_VALID_PRICE = 100.0
 MAX_VALID_PRICE = 10_000.0
 
+BASE_DIR     = os.path.dirname(__file__)
+CONFIG_PATH  = os.path.join(BASE_DIR, "tracker_config.json")
+
 
 # ── Data Schema ────────────────────────────────────────────────────────────────
 
 class MacBookProductSchema(BaseModel):
-    """Structured fields extracted by ScrapeGraphAI from each product page."""
+    """Structured fields extracted by AI from each product page."""
     product_title: str
     current_price: float   # USD, numeric only — no $ or commas
-    stock_status: str
+    stock_status:  str
 
 
 # ── Notification Helpers ───────────────────────────────────────────────────────
 
 def _send_ntfy(title: str, body: str, priority: str = "default", tags: str = "") -> None:
-    """POST a push notification to ntfy.sh."""
+    """POST a push notification to ntfy.sh with ASCII-safe header."""
+    safe_title = title.encode("ascii", errors="replace").decode("ascii")
     try:
         response = requests.post(
             f"https://ntfy.sh/{NTFY_TOPIC}",
             data=body.encode("utf-8"),
-            headers={
-                "Title": title,
-                "Priority": priority,
-                "Tags": tags,
-            },
+            headers={"Title": safe_title, "Priority": priority, "Tags": tags},
             timeout=10,
         )
         response.raise_for_status()
@@ -79,12 +90,13 @@ def notify_price_drop(product_title: str, price: float, stock_status: str, url: 
     print("    ✅ Price drop alert sent via ntfy!")
 
 
-def notify_price_report(product_title: str, price: float, threshold: float, stock_status: str, url: str) -> None:
-    """Send a report-mode notification with the real extracted price for pipeline verification."""
+def notify_price_report(product_title: str, price: float, threshold: float,
+                        stock_status: str, url: str) -> None:
+    """Send a report-mode notification showing the real extracted price vs threshold."""
     gap = price - threshold
     vs_threshold = f"${gap:+.2f} vs threshold ${threshold:.2f}"
     _send_ntfy(
-        title=f"[Report] B&H Price Check",
+        title="[Report] B&H Price Check",
         body=f"Current price: ${price:.2f}\n{vs_threshold}\n{product_title}\nStock: {stock_status}\n{url}",
         priority="default",
         tags="chart_with_upwards_trend,apple",
@@ -95,7 +107,7 @@ def notify_price_report(product_title: str, price: float, threshold: float, stoc
 def notify_extraction_error(product_name: str, reason: str) -> None:
     """Send a warning alert when extraction fails or sanity check fails."""
     _send_ntfy(
-        title="Price Tracker - Extraction Error",
+        title="Price Tracker — Extraction Error",
         body=f"Failed to extract price for:\n{product_name}\n\nReason: {reason}",
         priority="default",
         tags="warning",
@@ -103,108 +115,227 @@ def notify_extraction_error(product_name: str, reason: str) -> None:
     print("    ⚠️  Error alert sent via ntfy!")
 
 
-# ── Telegram Alternative ───────────────────────────────────────────────────────
-# To switch from ntfy to Telegram:
-#   1. Add TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID to your .env / GitHub Secrets
-#   2. Replace calls to notify_price_drop() and notify_extraction_error() with
-#      the send_telegram() function below.
-#
-# def send_telegram(message: str) -> None:
-#     token = os.getenv("TELEGRAM_BOT_TOKEN", "")
-#     chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
-#     requests.get(
-#         f"https://api.telegram.org/bot{token}/sendMessage",
-#         params={"chat_id": chat_id, "text": message, "parse_mode": "Markdown"},
-#         timeout=10,
-#     )
+# ── Provider Selection (mirrors check_deals.py) ────────────────────────────────
+
+def _check_sgai_credits() -> int:
+    """
+    Returns remaining SGAI credits as an integer.
+    Returns -1 if the check itself fails (network error, invalid key, etc.).
+    Returns  0 if credits are confirmed exhausted.
+    """
+    if not SGAI_API_KEY:
+        return -1
+    try:
+        from scrapegraph_py import ScrapeGraphAI
+        sgai = ScrapeGraphAI(api_key=SGAI_API_KEY)
+        info = sgai.credits()
+        # Handle nested data attribute first (new SDK format)
+        if hasattr(info, "data") and info.data is not None:
+            d = info.data
+            for field in ("remaining", "remaining_credits", "credits", "balance"):
+                if hasattr(d, field):
+                    return int(getattr(d, field))
+                if isinstance(d, dict) and field in d:
+                    return int(d[field])
+        if isinstance(info, (int, float)):
+            return int(info)
+        if isinstance(info, dict):
+            for field in ("remaining", "remaining_credits", "credits", "balance"):
+                if field in info:
+                    return int(info[field])
+        for attr in ("remaining", "remaining_credits", "credits", "balance"):
+            if hasattr(info, attr):
+                return int(getattr(info, attr))
+        print(f"  ⚠️  Unrecognised SGAI credits response: {info}")
+        return -1
+    except Exception as exc:
+        print(f"  ⚠️  SGAI credit check failed: {exc}")
+        return -1
+
+
+def select_provider(min_credits_needed: int) -> tuple[str, object]:
+    """
+    Selects extraction provider based on SGAI credit availability.
+      1. SGAI  — if credit balance >= min_credits_needed
+      2. Firecrawl — automatic fallback when SGAI credits are insufficient
+    Returns (provider_name, client). Exits with code 1 if neither is available.
+    """
+    print("🔌 Selecting extraction provider...")
+
+    remaining = _check_sgai_credits()
+
+    if remaining == -1:
+        if SGAI_API_KEY:
+            print("  ⚠️  SGAI credit check inconclusive — attempting SGAI anyway.")
+            from scrapegraph_py import ScrapeGraphAI
+            return "sgai", ScrapeGraphAI(api_key=SGAI_API_KEY)
+    elif remaining >= min_credits_needed:
+        print(f"  ✅ SGAI: {remaining} credits available (need {min_credits_needed}) → using SGAI")
+        from scrapegraph_py import ScrapeGraphAI
+        return "sgai", ScrapeGraphAI(api_key=SGAI_API_KEY)
+    else:
+        print(f"  ⚠️  SGAI: only {remaining} credits remaining (need {min_credits_needed})")
+
+    if FIRECRAWL_API_KEY:
+        print("  ✅ Falling back to Firecrawl.")
+        from firecrawl import FirecrawlApp
+        return "firecrawl", FirecrawlApp(api_key=FIRECRAWL_API_KEY)
+
+    print("❌ No extraction provider available.")
+    print("   • SGAI: credits exhausted or key missing → set SGAI_API_KEY")
+    print("   • Firecrawl: not configured → set FIRECRAWL_API_KEY")
+    sys.exit(1)
+
+
+# ── Extraction ─────────────────────────────────────────────────────────────────
+
+_PRICE_PROMPT = (
+    "Extract the product title, the current retail price in USD as a plain "
+    "float (no currency symbols, no commas), and the stock availability status."
+)
+
+MAX_RETRIES   = 3
+RETRY_DELAYS  = [15, 30, 60]
+
+
+def _extract_price_sgai(client, url: str) -> dict | None:
+    """Single-product SGAI extraction with retry. Returns json_data dict or None."""
+    from scrapegraph_py import FetchConfig
+
+    last_error = ""
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            result = client.extract(
+                url=url,
+                schema=MacBookProductSchema.model_json_schema(),
+                prompt=_PRICE_PROMPT,
+                fetch_config=FetchConfig(mode="js", stealth=True, wait=2000),
+            )
+            break
+        except Exception as exc:
+            last_error = str(exc)
+            if attempt < MAX_RETRIES:
+                delay = RETRY_DELAYS[attempt - 1]
+                print(f"  ⚠️  SGAI attempt {attempt}/{MAX_RETRIES} failed ({exc}). Retrying in {delay}s...")
+                time.sleep(delay)
+            else:
+                print(f"  ❌ SGAI: all {MAX_RETRIES} attempts failed. Last error: {exc}")
+                return None
+    else:
+        return None
+
+    if result.status == "error":
+        print(f"  ❌ SGAI extraction error: {result.error}")
+        return None
+
+    json_data = result.data.json_data
+    if not json_data:
+        print(f"  ❌ SGAI: json_data is empty. raw: {result.data.raw}")
+        return None
+
+    return json_data
+
+
+def _extract_price_firecrawl(client, url: str) -> dict | None:
+    """Single-product Firecrawl extraction. Returns dict with price fields or None."""
+    try:
+        result = client.extract(
+            urls=[url],
+            prompt=_PRICE_PROMPT,
+            schema=MacBookProductSchema.model_json_schema(),
+        )
+        # Defensive: handle multiple possible response formats
+        candidates = []
+        if isinstance(result, dict):
+            candidates.append(result)
+            if "data" in result:
+                d = result["data"]
+                candidates.append(d) if isinstance(d, dict) else None
+                if isinstance(d, list) and d:
+                    candidates.append(d[0])
+        if hasattr(result, "data"):
+            d = result.data
+            if isinstance(d, dict):
+                candidates.append(d)
+            elif isinstance(d, list) and d:
+                candidates.append(d[0])
+
+        for c in candidates:
+            if isinstance(c, dict) and "current_price" in c:
+                return c
+
+        print(f"  ⚠️  Firecrawl: unrecognised response format.")
+        print(f"  Raw: {str(result)[:300]}")
+        return None
+    except Exception as exc:
+        print(f"  ⚠️  Firecrawl exception: {exc}")
+        return None
 
 
 # ── Core Logic ─────────────────────────────────────────────────────────────────
 
 def load_active_products() -> list[dict]:
     """Load tracker_config.json and return only bh_price entries where active == true."""
-    config_path = os.path.join(os.path.dirname(__file__), "tracker_config.json")
-    with open(config_path, "r", encoding="utf-8") as f:
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         config = json.load(f)
     all_products = [t for t in config.get("trackers", []) if t.get("type") == "bh_price"]
     return [p for p in all_products if p.get("active", False)]
 
 
-def check_product(sgai: ScrapeGraphAI, product: dict) -> None:
-    """Extract price for one product and trigger notification if below threshold."""
-    name: str = product["name"]
-    url: str = product["url"]
+def check_product(provider: str, client, product: dict) -> None:
+    """Extract price for one product and trigger notification based on run mode."""
+    name:      str   = product["name"]
+    url:       str   = product["url"]
     threshold: float = float(product["threshold"])
 
-    print(f"→ {name}")
+    print(f"→ {name} [{provider.upper()}]")
     print(f"  URL: {url}")
     print(f"  Threshold: ${threshold:.2f}")
 
     # ── Simulation mode ────────────────────────────────────────────────────────
     if PRICE_OVERRIDE is not None:
         print(f"  ℹ️  PRICE_OVERRIDE active — using ${PRICE_OVERRIDE:.2f} (real price not fetched)")
-        price = PRICE_OVERRIDE
+        price         = PRICE_OVERRIDE
         product_title = name
-        stock_status = "Simulated"
+        stock_status  = "Simulated"
 
     # ── Live extraction mode ───────────────────────────────────────────────────
     else:
-        import time
-        MAX_RETRIES = 3
-        RETRY_DELAYS = [15, 30, 60]  # seconds between attempts
-        last_error: str = ""
-
-        for attempt in range(1, MAX_RETRIES + 1):
-            try:
-                result = sgai.extract(
-                    url=url,
-                    schema=MacBookProductSchema.model_json_schema(),  # SDK requires a dict, not a class
-                    prompt=(
-                        "Extract the product title, the current retail price in USD as a plain "
-                        "float (no currency symbols, no commas), and the stock availability status."
-                    ),
-                    fetch_config=FetchConfig(mode="js", stealth=True, wait=2000),
-                )
-                break  # success — exit retry loop
-            except Exception as exc:
-                last_error = str(exc)
-                if attempt < MAX_RETRIES:
-                    delay = RETRY_DELAYS[attempt - 1]
-                    print(f"  ⚠️  Attempt {attempt}/{MAX_RETRIES} failed ({exc}). Retrying in {delay}s...")
-                    time.sleep(delay)
-                else:
-                    print(f"  ❌ All {MAX_RETRIES} attempts failed. Last error: {exc}")
-                    notify_extraction_error(name, f"[attempt {attempt}/{MAX_RETRIES}] {last_error}")
-                    return
+        if provider == "sgai":
+            json_data = _extract_price_sgai(client, url)
         else:
-            # Loop completed without break (all retries failed via status check below)
-            notify_extraction_error(name, f"All retries exhausted: {last_error}")
-            return
+            json_data = _extract_price_firecrawl(client, url)
 
-        if result.status == "error":
-            err = result.error or "Unknown error"
-            # Retry on 504 (transient timeout) — already retried above for exceptions,
-            # but status-level errors need the same treatment
-            print(f"  ❌ Extraction failed (status=error): {err}")
-            notify_extraction_error(name, err)
-            return
+        # Dynamic fallback if first attempt failed
+        if json_data is None:
+            secondary_provider = "firecrawl" if provider == "sgai" else "sgai"
+            secondary_key = FIRECRAWL_API_KEY if secondary_provider == "firecrawl" else SGAI_API_KEY
+            if secondary_key:
+                print(f"  🔄 Primary [{provider.upper()}] failed. Falling back to [{secondary_provider.upper()}]...")
+                try:
+                    if secondary_provider == "firecrawl":
+                        from firecrawl import FirecrawlApp
+                        sec_client = FirecrawlApp(api_key=FIRECRAWL_API_KEY)
+                        json_data = _extract_price_firecrawl(sec_client, url)
+                    else:
+                        from scrapegraph_py import ScrapeGraphAI
+                        sec_client = ScrapeGraphAI(api_key=SGAI_API_KEY)
+                        json_data = _extract_price_sgai(sec_client, url)
+                except Exception as exc:
+                    print(f"  ⚠️  Failed to initialize or extract via fallback provider {secondary_provider.upper()}: {exc}")
 
-        # ExtractResponse.json_data is the dict containing our extracted schema fields
-        json_data = result.data.json_data
-        if not json_data:
-            msg = f"json_data is empty. raw response: {result.data.raw}"
-            print(f"  ❌ {msg}")
-            notify_extraction_error(name, msg)
+        if json_data is None:
+            notify_extraction_error(name, "All extraction attempts failed.")
             return
 
         try:
-            price = float(json_data["current_price"])
+            price         = float(json_data["current_price"])
             product_title = str(json_data["product_title"])
-            stock_status = str(json_data["stock_status"])
+            stock_status  = str(json_data["stock_status"])
         except (KeyError, TypeError, ValueError) as exc:
-            print(f"  ❌ Failed to read fields from json_data: {exc}")
-            print(f"  json_data contents: {json_data}")
-            notify_extraction_error(name, f"Field read error: {exc} | json_data: {json_data}")
+            msg = f"Field read error: {exc} | json_data: {json_data}"
+            print(f"  ❌ {msg}")
+            notify_extraction_error(name, msg)
             return
 
         print(f"  Title:  {product_title}")
@@ -213,8 +344,6 @@ def check_product(sgai: ScrapeGraphAI, product: dict) -> None:
     print(f"  Price:  ${price:.2f}")
 
     # ── Sanity guard ───────────────────────────────────────────────────────────
-    # A price outside the valid range almost certainly means the AI extracted
-    # text from a Cloudflare challenge page instead of the real product page.
     if not (MIN_VALID_PRICE < price < MAX_VALID_PRICE):
         reason = (
             f"Extracted price ${price:.2f} is outside the valid range "
@@ -225,15 +354,14 @@ def check_product(sgai: ScrapeGraphAI, product: dict) -> None:
         notify_extraction_error(name, reason)
         return
 
-    # ── Price threshold check ──────────────────────────────────────────────────
+    # ── Notification ───────────────────────────────────────────────────────────
     display_title = product_title if PRICE_OVERRIDE is None else name
 
     if REPORT_MODE:
-        # Test mode: real extraction already happened — always notify with actual price
-        print(f"  📊 REPORT MODE — sending price report regardless of threshold.")
+        print("  📊 REPORT MODE — sending price report regardless of threshold.")
         notify_price_report(display_title, price, threshold, stock_status, url)
     elif price < threshold:
-        print(f"  🚨 BELOW THRESHOLD — sending alert!")
+        print("  🚨 BELOW THRESHOLD — sending alert!")
         notify_price_drop(display_title, price, stock_status, url)
     else:
         gap = price - threshold
@@ -243,29 +371,32 @@ def check_product(sgai: ScrapeGraphAI, product: dict) -> None:
 # ── Entry Point ────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    # Validate required env vars
-    missing = [k for k, v in {"SGAI_API_KEY": SGAI_API_KEY, "NTFY_TOPIC": NTFY_TOPIC}.items() if not v]
-    if missing:
-        print(f"❌ Missing required environment variable(s): {', '.join(missing)}")
-        print("   Set them in your .env file (local) or GitHub Secrets (CI).")
+    if not NTFY_TOPIC:
+        print("❌ Missing NTFY_TOPIC. Set it in .env or GitHub Secrets.")
+        sys.exit(1)
+    if not SGAI_API_KEY and not FIRECRAWL_API_KEY:
+        print("❌ No extraction provider configured.")
+        print("   Set SGAI_API_KEY and/or FIRECRAWL_API_KEY in .env or GitHub Secrets.")
         sys.exit(1)
 
     if REPORT_MODE:
-        print(f"📊 Running in REPORT MODE — real extraction, always notify with actual price.\n")
+        print("📊 Running in REPORT MODE — real extraction, always notify with actual price.\n")
     if PRICE_OVERRIDE is not None:
         print(f"⚠️  Running in SIMULATION mode — PRICE_OVERRIDE=${PRICE_OVERRIDE:.2f}\n")
 
     products = load_active_products()
     if not products:
-        print("No active products in products.json. Nothing to check.")
+        print("No active bh_price entries in tracker_config.json. Nothing to check.")
         sys.exit(0)
 
-    print(f"🔍 Checking {len(products)} active product(s)...\n")
+    print(f"🔍 Checking {len(products)} active product(s).\n")
 
-    sgai = ScrapeGraphAI(api_key=SGAI_API_KEY)
+    min_credits = SGAI_CREDITS_PER_CALL * len(products)
+    provider, client = select_provider(min_credits)
+    print()
 
     for product in products:
-        check_product(sgai, product)
+        check_product(provider, client, product)
         print()
 
     print("✅ All checks complete.")

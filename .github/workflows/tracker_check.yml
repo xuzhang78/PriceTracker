@@ -37,6 +37,7 @@ on:
 jobs:
   dealmoon:
     name: "Dealmoon BOGO Check"
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_tracker == 'auto' || inputs.run_tracker == 'dealmoon' || inputs.run_tracker == 'both' }}
     runs-on: ubuntu-latest
 
     steps:
@@ -89,6 +90,7 @@ jobs:
 # ── Subagent: B&H Price Check ──────────────────────────────────────────────────
   bh-prices:
     name: "B&H Price Check"
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_tracker == 'auto' || inputs.run_tracker == 'bh' || inputs.run_tracker == 'both' }}
     runs-on: ubuntu-latest
 
     steps:
@@ -132,8 +134,9 @@ jobs:
       - name: Run B&H price check
         if: steps.gate.outputs.skip != 'true'
         env:
-          SGAI_API_KEY:   ${{ secrets.SGAI_API_KEY }}
-          NTFY_TOPIC:     ${{ secrets.NTFY_TOPIC }}
-          PRICE_OVERRIDE: ${{ inputs.price_override }}
-          REPORT_MODE:    ${{ inputs.report_mode || 'false' }}
+          SGAI_API_KEY:      ${{ secrets.SGAI_API_KEY }}
+          FIRECRAWL_API_KEY: ${{ secrets.FIRECRAWL_API_KEY }}
+          NTFY_TOPIC:        ${{ secrets.NTFY_TOPIC }}
+          PRICE_OVERRIDE:    ${{ inputs.price_override }}
+          REPORT_MODE:       ${{ inputs.report_mode || 'false' }}
         run: python check_prices.py
