@@ -7,9 +7,19 @@ on:
   schedule:
     - cron: "0 10 * * *"
 
-  # Manual trigger — supports both Dealmoon E2E testing and B&H price simulation.
+  # Manual trigger — supports isolated testing of each tracker.
   workflow_dispatch:
     inputs:
+      run_tracker:
+        description: "Which tracker to run (auto = respect active flags in tracker_config.json)"
+        required: false
+        default: "auto"
+        type: choice
+        options:
+          - auto
+          - dealmoon
+          - bh
+          - both
       include_expired:
         description: "Dealmoon: set 'true' to include expired deals (E2E pipeline test)"
         required: false
@@ -29,15 +39,30 @@ jobs:
       - name: Check for active trackers
         id: check_active
         run: |
-          dealmoon=$(jq '[.trackers[] | select(.type == "dealmoon_bogo" and .active == true)] | length' tracker_config.json)
-          bh=$(jq '[.trackers[] | select(.type == "bh_price" and .active == true)] | length' tracker_config.json)
+          override="${{ inputs.run_tracker || 'auto' }}"
 
-          [ "$dealmoon" -gt 0 ] && dm_flag=true || dm_flag=false
-          [ "$bh" -gt 0 ]       && bh_flag=true || bh_flag=false
+          if [ "$override" = "dealmoon" ] || [ "$override" = "both" ]; then
+            dm_flag=true
+          elif [ "$override" = "bh" ]; then
+            dm_flag=false
+          else
+            # auto: respect active flags in tracker_config.json
+            count=$(jq '[.trackers[] | select(.type == "dealmoon_bogo" and .active == true)] | length' tracker_config.json)
+            [ "$count" -gt 0 ] && dm_flag=true || dm_flag=false
+          fi
+
+          if [ "$override" = "bh" ] || [ "$override" = "both" ]; then
+            bh_flag=true
+          elif [ "$override" = "dealmoon" ]; then
+            bh_flag=false
+          else
+            count=$(jq '[.trackers[] | select(.type == "bh_price" and .active == true)] | length' tracker_config.json)
+            [ "$count" -gt 0 ] && bh_flag=true || bh_flag=false
+          fi
 
           echo "dealmoon_active=$dm_flag" >> $GITHUB_OUTPUT
           echo "bh_active=$bh_flag"       >> $GITHUB_OUTPUT
-          echo "Dealmoon BOGO brands: $dealmoon active | B&H products: $bh active"
+          echo "run_tracker=$override | dealmoon=$dm_flag | bh=$bh_flag"
 
       - uses: actions/setup-python@v6
         if: steps.check_active.outputs.dealmoon_active == 'true' || steps.check_active.outputs.bh_active == 'true'
