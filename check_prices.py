@@ -68,18 +68,22 @@ class MacBookProductSchema(BaseModel):
 # ── Notification Helpers ───────────────────────────────────────────────────────
 
 def _send_ntfy(title: str, body: str, priority: str = "default", tags: str = "") -> None:
-    """POST a push notification to ntfy.sh with ASCII-safe header."""
+    """POST a push notification to ntfy.sh with ASCII-safe header, up to 3 attempts."""
     safe_title = title.encode("ascii", errors="replace").decode("ascii")
-    try:
-        response = requests.post(
-            f"https://ntfy.sh/{NTFY_TOPIC}",
-            data=body.encode("utf-8"),
-            headers={"Title": safe_title, "Priority": priority, "Tags": tags},
-            timeout=10,
-        )
-        response.raise_for_status()
-    except requests.RequestException as exc:
-        print(f"    ⚠️  ntfy send failed: {exc}")
+    for attempt in range(1, 4):
+        try:
+            response = requests.post(
+                f"https://ntfy.sh/{NTFY_TOPIC}",
+                data=body.encode("utf-8"),
+                headers={"Title": safe_title, "Priority": priority, "Tags": tags},
+                timeout=10,
+            )
+            response.raise_for_status()
+            return
+        except requests.RequestException as exc:
+            print(f"    ⚠️  ntfy send attempt {attempt}/3 failed: {exc}")
+            if attempt < 3:
+                time.sleep(5)
 
 
 def notify_price_drop(product_title: str, price: float, stock_status: str, url: str) -> None:
@@ -353,6 +357,19 @@ def process_product_result(product: dict, json_data: dict | None) -> None:
     print(f"  Title:  {product_title}")
     print(f"  Stock:  {stock_status}")
     print(f"  Price:  ${price:.2f}")
+
+    # ── Out of Stock Check ─────────────────────────────────────────────────────
+    stock_status_lower = stock_status.lower()
+    is_out_of_stock = (
+        "out of stock" in stock_status_lower or
+        "email when" in stock_status_lower or
+        "notify" in stock_status_lower or
+        "coming soon" in stock_status_lower or
+        "unavailable" in stock_status_lower
+    )
+    if is_out_of_stock and price < MIN_VALID_PRICE:
+        print("  ℹ️ Product is Out of Stock. Skipping price check and sanity guard.")
+        return
 
     # ── Sanity guard ───────────────────────────────────────────────────────────
     if not (MIN_VALID_PRICE < price < MAX_VALID_PRICE):

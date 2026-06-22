@@ -122,18 +122,22 @@ def mark_notified(state: dict, title: str) -> None:
 # ── Notification Helpers ───────────────────────────────────────────────────────
 
 def _send_ntfy(title: str, body: str, priority: str = "default", tags: str = "") -> None:
-    """POST a push notification to ntfy.sh with ASCII-safe header."""
+    """POST a push notification to ntfy.sh with ASCII-safe header, up to 3 attempts."""
     safe_title = title.encode("ascii", errors="replace").decode("ascii")
-    try:
-        response = requests.post(
-            f"https://ntfy.sh/{NTFY_TOPIC}",
-            data=body.encode("utf-8"),
-            headers={"Title": safe_title, "Priority": priority, "Tags": tags},
-            timeout=10,
-        )
-        response.raise_for_status()
-    except requests.RequestException as exc:
-        print(f"    ⚠️  ntfy send failed: {exc}")
+    for attempt in range(1, 4):
+        try:
+            response = requests.post(
+                f"https://ntfy.sh/{NTFY_TOPIC}",
+                data=body.encode("utf-8"),
+                headers={"Title": safe_title, "Priority": priority, "Tags": tags},
+                timeout=10,
+            )
+            response.raise_for_status()
+            return
+        except requests.RequestException as exc:
+            print(f"    ⚠️  ntfy send attempt {attempt}/3 failed: {exc}")
+            if attempt < 3:
+                time.sleep(5)
 
 
 def notify_bogo_deal(brand: str, deal_title: str, description: str, deal_date: str) -> None:
