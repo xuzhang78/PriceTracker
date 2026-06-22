@@ -36,17 +36,18 @@ Monitors Dealmoon's **official brand pages** (Clinique and Lancome) daily for "B
 ```
 GitHub Actions (daily 10:00 UTC)
     └── check_deals.py
-            ├── Load deals_config.json
-            ├── Load deals_state.json
-            ├── ScrapeGraphAI → Lancome official page (js + stealth mode)
-            │       └── Retry up to 3× (15s, 30s backoff)
-            ├── ScrapeGraphAI → Clinique official page (js + stealth mode)
-            │       └── Retry up to 3× (15s, 30s backoff)
-            ├── Priority retry: if Lancome failed but Clinique succeeded
+            ├── Load tracker_config.json & deals_state.json
+            ├── Select Provider (SGAI or Firecrawl based on credit balance)
+            ├── For each active brand:
+            │       ├── Fetch page 1 (using JS rendering + stealth proxy)
+            │       ├── If testing mode AND no BOGO matches found on page 1:
+            │       │       └── Dynamically fetch page 2 & page 3 sequentially
+            │       └── On Firecrawl: fetch raw HTML and parse Unix timestamps
+            ├── Fallback: if SGAI fails, automatically fall back to Firecrawl
+            ├── Priority retry: if Lancome fails but Clinique succeeds
             │       └── Retry Lancome up to 3 more times
             ├── Full-flow retry: if ALL brands failed
-            │       └── Sleep 2h → retry entire flow once
-            │               └── If still all failed → ntfy error alert
+            │       └── Sleep 2h (skipped in testing) → retry entire flow once
             ├── Keyword filter (BOGO / buy one get one / b1g1 / ...)
             ├── Deduplication check (deals_state.json)
             └── ntfy.sh high-priority push → 📱 your phone
@@ -139,12 +140,45 @@ class Deal(BaseModel):
     description: str   # Full details, promo codes, gift items, expiry
     deal_date:   str   # Date posted/started (e.g. "May 30", "2026-05-30"), empty if not found
     is_expired:  bool  # True if marked expired on Dealmoon page
+    deal_url:    str   # URL link of the deal page (used for exact date mapping)
 ```
 
 ```python
 class DealmoonSchema(BaseModel):
     deals: list[Deal]  # All deals on the page
 ```
+
+### Extraction Prompt
+
+The exact prompt used for Dealmoon extraction is:
+```python
+_EXTRACTION_PROMPT = (
+    "Extract all deals listed on the page. For each deal, capture: "
+    "(1) the title/headline, "
+    "(2) the full description including terms, promo codes, or gift details, "
+    "(3) the date the deal was posted or started — look for timestamps or date "
+    "labels near the deal entry (return as a string like 'May 30' or '2026-05-30', "
+    "or empty string if not visible), "
+    "(4) whether it is marked as expired, "
+    "(5) the URL link of the deal page (e.g. 'https://www.dealmoon.com/en/.../5881094.html'). "
+    "{expired_instruction} Extract ALL deals listed on the page from top to bottom. "
+    "Do not skip or truncate any deals."
+)
+```
+
+### Date Extraction via HTML Unix Timestamps
+
+Because Firecrawl and ScrapeGraphAI strip relative date formatting tags (like `<label class="einfo">13 hrs ago</label>`) during HTML-to-Markdown conversion, the LLM cannot extract the date natively. To resolve this:
+1. Firecrawl is instructed to return both the raw `html` and the structured `json` data.
+2. In Python, we parse the raw HTML using regex to build a mapping of `deal_id` to Unix timestamp (`t="..."`) and format it into a clean date string (e.g., `Jun 21, 2026`).
+3. We then match each LLM-extracted deal's `deal_url` ID with the HTML-parsed mapping, overwriting empty dates with precise human-readable timestamps.
+
+### Dynamic Pagination Loop (Testing Only)
+
+To prevent truncation issues and ensure that manual E2E test runs can always find at least one historical expired BOGO deal:
+* In testing mode (`INCLUDE_EXPIRED=true`), if page 1 yields `0` BOGO matches for a brand, the script dynamically fetches page 2 (`&p=2`) and page 3 (`&p=3`) sequentially.
+* The loop stops immediately once a BOGO match is found, conserving API credits.
+* Scheduled daily runs only query page 1 (since active deals are always fresh and displayed on the first page), avoiding credit waste.
 
 ### SGAI Extraction Settings
 

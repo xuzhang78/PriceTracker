@@ -32,15 +32,15 @@ Checks the price of tracked products daily using AI extraction and sends a push 
 
 **Stack:**
 - **Scheduler:** GitHub Actions cron (`0 9 * * *` → 09:00 UTC daily)
-- **AI Extraction:** ScrapeGraphAI cloud `extract()` API
+- **AI Extraction:** ScrapeGraphAI (primary) or Firecrawl (fallback when credits are depleted)
 - **Notifications:** ntfy.sh push (primary), Telegram (commented-out alternative)
-- **Config:** `products.json` — add/pause/remove products with no code changes
+- **Config:** `tracker_config.json` — unified tracker config file
 
 **Why GitHub Actions instead of SGAI Monitors:**
-SGAI's Monitor feature sends data via webhook, which requires a public-URL server to receive it. GitHub Actions acts as the scheduler instead, calling `sgai.extract()` fresh on each run. This eliminates the need for any hosted server.
+SGAI's Monitor feature sends data via webhook, which requires a public-URL server to receive it. GitHub Actions acts as the scheduler instead, calling the extraction API fresh on each run. This eliminates the need for any hosted server.
 
-**Why `sgai.extract()` instead of `sgai.monitor.create()`:**
-`monitor.create()` uses `schedule=` (not `interval=`), returns `monitor.data.cron_id` (not `monitor['id']`), and has no `prompt=` parameter for alert logic. The alert threshold logic must live in external code regardless. GitHub Actions + `extract()` is simpler end-to-end.
+**Why direct extraction instead of monitor.create():**
+Direct extraction is simpler and allows dynamically choosing between ScrapeGraphAI and Firecrawl at run time depending on credit availability, while monitors are locked into ScrapeGraphAI.
 
 ---
 
@@ -75,24 +75,27 @@ PriceTracker/
 ```
 GitHub Actions (cron: 0 9 * * *)
     └── runs check_prices.py
-            ├── loads products.json → filters active: true entries
+            ├── loads tracker_config.json → filters active bh_price entries
             └── for each active product:
-                    ├── sgai.extract(url, schema_dict, prompt, FetchConfig)
-                    │       └── ScrapeGraphAI cloud: renders page (JS + stealth)
-                    │                               → AI extracts structured data
-                    │                               → returns ExtractResponse
-                    ├── reads result.data.json_data["current_price"] etc.
+                    ├── Select Provider (SGAI or Firecrawl based on credit balance)
+                    ├── Extract Price (js rendering + stealth proxy, up to 3 retries):
+                    │       ├── SGAI: sgai.extract()
+                    │       └── Firecrawl: client.scrape()
+                    ├── Fallback: SGAI fail → fall back to Firecrawl (one-way only)
+                    ├── reads current_price, stock_status, product_title
                     ├── sanity guard: 100 < price < 10,000
-                    ├── if price < threshold → POST to ntfy.sh
-                    └── if error at any step → POST warning to ntfy.sh
+                    ├── if price < threshold → POST drop alert to ntfy.sh
+                    └── if error at any step:
+                            └── if IS_TEST → exit immediately
+                            └── otherwise → sleep 2h and retry once → alert on fail
 ```
 
 ---
 
-## 4. SGAI SDK — Critical Implementation Details
+## 4. API & SDK — Critical Implementation Details
 
 > [!IMPORTANT]
-> This section documents hard-won knowledge from debugging. Read before modifying `check_prices.py`.
+> This section documents developer knowledge for ScrapeGraphAI (SGAI) and Firecrawl. Read before modifying `check_prices.py`.
 
 ### Python Version Requirement
 
@@ -106,13 +109,13 @@ ERROR: 2.1.0 Requires-Python >=3.12
 
 The GitHub Actions workflow uses `python-version: "3.12"` for this reason.
 
-### `sgai.extract()` — Correct Call Signature
+### ScrapeGraphAI `sgai.extract()` Signature
 
 ```python
 result = sgai.extract(
     url=url,
     schema=MacBookProductSchema.model_json_schema(),  # ← MUST be a dict, not the class
-    prompt="Extract the product title, current retail price as a float, and stock status.",
+    prompt=_PRICE_PROMPT,
     fetch_config=FetchConfig(mode="js", stealth=True, wait=2000),
 )
 ```
@@ -120,6 +123,33 @@ result = sgai.extract(
 **Critical:** `schema=` expects a **JSON schema dict**, not a Pydantic class.
 - ❌ `schema=MacBookProductSchema` → `ValidationError: Input should be a valid dictionary`
 - ✅ `schema=MacBookProductSchema.model_json_schema()` → works
+
+### Firecrawl `client.scrape()` Signature (V2 API)
+
+For Firecrawl, we migrate from `/v2/extract` (deprecated) to `/v2/scrape` with custom JSON format schemas:
+
+```python
+doc = client.scrape(
+    url,
+    formats=[
+        {
+            "type": "json",
+            "schema": MacBookProductSchema.model_json_schema(),
+            "prompt": _PRICE_PROMPT
+        }
+    ]
+)
+```
+
+### Extraction Prompt
+
+The prompt used for price extraction is:
+```python
+_PRICE_PROMPT = (
+    "Extract the product title, the current retail price in USD as a plain "
+    "float (no currency symbols, no commas), and the stock availability status."
+)
+```
 
 ### `ExtractResponse` Object Structure
 

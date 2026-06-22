@@ -15,31 +15,33 @@ Sends a high-priority push notification the moment a new active BOGO deal is det
 ```
 GitHub Actions (daily 10:00 UTC)
     └── check_deals.py
-            ├── sgai.extract(clinique_url)  ← AI reads brand page
-            ├── sgai.extract(lancome_url)   ← AI reads brand page
+            ├── select provider (SGAI or Firecrawl)
+            ├── extract page deals (including raw HTML on Firecrawl)
+            ├── parse Unix timestamps from HTML to resolve dates
             └── BOGO keyword match + new deal → ntfy.sh → 📱 your phone
 ```
 
 **Key features:**
-- 3-attempt retry loop with exponential backoff (15s, 30s) to handle transient HTTP 502/504 errors
-- Automatic URL fallback — complex search URL → clean canonical landing URL
-- State deduplication — `deals_state.json` tracks notified deals to prevent spam
-- `INCLUDE_EXPIRED=true` mode for real-data end-to-end pipeline testing
+- **Exact Date Parsing**: Fallback to raw HTML parsing to capture real timestamps (`t="..."`) and map them to LLM-extracted deals.
+- **Dynamic Testing Pagination**: Automatically paginates up to 3 pages in E2E testing mode if no BOGO deal is found on page 1.
+- **Robust Provider Gating**: Intelligent fallback from SGAI to Firecrawl when credits are depleted.
+- **State deduplication**: `deals_state.json` tracks notified deals to prevent spam.
 
 ---
 
-### 2. 💻 B&H Photo MacBook Price Tracker (`check_prices.py`) — *Currently Paused*
+### 2. 💻 B&H Photo MacBook Price Tracker (`check_prices.py`)
 
 Monitors B&H Photo for MacBook Pro M5 price drops below a configured threshold.
-All products are currently set to `"active": false` in `products.json`.
 
 ```
 GitHub Actions (daily 09:00 UTC)
     └── check_prices.py
+            ├── select provider (SGAI or Firecrawl)
+            ├── extract MacBook price details
             └── price < threshold → ntfy.sh → 📱 your phone
 ```
 
-To re-enable, set `"active": true` for the desired product in `products.json`.
+All configurations are managed in the unified config file `tracker_config.json`.
 
 ---
 
