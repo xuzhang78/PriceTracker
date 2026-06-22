@@ -56,6 +56,8 @@ SGAI_API_KEY        = os.getenv("SGAI_API_KEY", "")
 FIRECRAWL_API_KEY   = os.getenv("FIRECRAWL_API_KEY", "")
 NTFY_TOPIC          = os.getenv("NTFY_TOPIC", "")
 INCLUDE_EXPIRED     = os.getenv("INCLUDE_EXPIRED", "false").strip().lower() == "true"
+TESTING             = os.getenv("TESTING", "false").strip().lower() == "true"
+IS_TEST             = INCLUDE_EXPIRED or TESTING
 
 SGAI_CREDITS_PER_CALL = 10      # credits consumed per SGAI extract call
 MAX_RETRIES           = 3
@@ -550,6 +552,11 @@ def main() -> None:
 
     # ── Full-flow retry on total failure ───────────────────────────────────────
     if all(v is None for v in results.values()):
+        if IS_TEST:
+            print("\n⚠️ All brands failed, but running in testing mode — skipping 2-hour retry sleep.")
+            notify_extraction_error(brand_names, provider)
+            sys.exit(1)
+
         wait_hours = FLOW_RETRY_WAIT // 3600
         print(f"\n⏳ All brands failed. Retrying entire flow in {wait_hours}h...")
         time.sleep(FLOW_RETRY_WAIT)

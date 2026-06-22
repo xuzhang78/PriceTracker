@@ -42,8 +42,11 @@ NTFY_TOPIC          = os.getenv("NTFY_TOPIC", "")
 _price_override_raw = os.getenv("PRICE_OVERRIDE", "").strip()
 PRICE_OVERRIDE: float | None = float(_price_override_raw) if _price_override_raw else None
 REPORT_MODE         = os.getenv("REPORT_MODE", "false").strip().lower() == "true"
+TESTING             = os.getenv("TESTING", "false").strip().lower() == "true"
+IS_TEST             = (PRICE_OVERRIDE is not None) or REPORT_MODE or TESTING
 
 SGAI_CREDITS_PER_CALL = 10       # credits consumed per SGAI extract call
+FLOW_RETRY_WAIT       = 2 * 3600
 
 # Prices outside this range indicate a failed / blocked extraction
 MIN_VALID_PRICE = 100.0
@@ -282,65 +285,75 @@ def load_active_products() -> list[dict]:
     return [p for p in all_products if p.get("active", False)]
 
 
-def check_product(provider: str, client, product: dict) -> None:
-    """Extract price for one product and trigger notification based on run mode."""
+def extract_product_data(provider: str, client, product: dict) -> dict | None:
+    """
+    Extracts price and stock data for one product.
+    Returns extracted data dict or None on failure.
+    """
+    name: str = product["name"]
+    url:  str = product["url"]
+
+    # ── Simulation mode ────────────────────────────────────────────────────────
+    if PRICE_OVERRIDE is not None:
+        return {
+            "product_title": name,
+            "current_price": PRICE_OVERRIDE,
+            "stock_status": "Simulated"
+        }
+
+    # ── Live extraction mode ───────────────────────────────────────────────────
+    if provider == "sgai":
+        json_data = _extract_price_sgai(client, url)
+    else:
+        json_data = _extract_price_firecrawl(client, url)
+
+    # Dynamic fallback if first attempt failed
+    if json_data is None:
+        secondary_provider = "firecrawl" if provider == "sgai" else "sgai"
+        secondary_key = FIRECRAWL_API_KEY if secondary_provider == "firecrawl" else SGAI_API_KEY
+        if secondary_key:
+            print(f"  🔄 Primary [{provider.upper()}] failed. Falling back to [{secondary_provider.upper()}]...")
+            try:
+                if secondary_provider == "firecrawl":
+                    from firecrawl import FirecrawlApp
+                    sec_client = FirecrawlApp(api_key=FIRECRAWL_API_KEY)
+                    json_data = _extract_price_firecrawl(sec_client, url)
+                else:
+                    from scrapegraph_py import ScrapeGraphAI
+                    sec_client = ScrapeGraphAI(api_key=SGAI_API_KEY)
+                    json_data = _extract_price_sgai(sec_client, url)
+            except Exception as exc:
+                print(f"  ⚠️  Failed to initialize or extract via fallback provider {secondary_provider.upper()}: {exc}")
+
+    return json_data
+
+
+def process_product_result(product: dict, json_data: dict | None) -> None:
+    """Validate extracted product data and trigger notifications based on thresholds."""
     name:      str   = product["name"]
     url:       str   = product["url"]
     threshold: float = float(product["threshold"])
 
-    print(f"→ {name} [{provider.upper()}]")
+    print(f"→ {name}")
     print(f"  URL: {url}")
     print(f"  Threshold: ${threshold:.2f}")
 
-    # ── Simulation mode ────────────────────────────────────────────────────────
-    if PRICE_OVERRIDE is not None:
-        print(f"  ℹ️  PRICE_OVERRIDE active — using ${PRICE_OVERRIDE:.2f} (real price not fetched)")
-        price         = PRICE_OVERRIDE
-        product_title = name
-        stock_status  = "Simulated"
+    if json_data is None:
+        notify_extraction_error(name, "All extraction attempts failed.")
+        return
 
-    # ── Live extraction mode ───────────────────────────────────────────────────
-    else:
-        if provider == "sgai":
-            json_data = _extract_price_sgai(client, url)
-        else:
-            json_data = _extract_price_firecrawl(client, url)
+    try:
+        price         = float(json_data["current_price"])
+        product_title = str(json_data["product_title"])
+        stock_status  = str(json_data["stock_status"])
+    except (KeyError, TypeError, ValueError) as exc:
+        msg = f"Field read error: {exc} | json_data: {json_data}"
+        print(f"  ❌ {msg}")
+        notify_extraction_error(name, msg)
+        return
 
-        # Dynamic fallback if first attempt failed
-        if json_data is None:
-            secondary_provider = "firecrawl" if provider == "sgai" else "sgai"
-            secondary_key = FIRECRAWL_API_KEY if secondary_provider == "firecrawl" else SGAI_API_KEY
-            if secondary_key:
-                print(f"  🔄 Primary [{provider.upper()}] failed. Falling back to [{secondary_provider.upper()}]...")
-                try:
-                    if secondary_provider == "firecrawl":
-                        from firecrawl import FirecrawlApp
-                        sec_client = FirecrawlApp(api_key=FIRECRAWL_API_KEY)
-                        json_data = _extract_price_firecrawl(sec_client, url)
-                    else:
-                        from scrapegraph_py import ScrapeGraphAI
-                        sec_client = ScrapeGraphAI(api_key=SGAI_API_KEY)
-                        json_data = _extract_price_sgai(sec_client, url)
-                except Exception as exc:
-                    print(f"  ⚠️  Failed to initialize or extract via fallback provider {secondary_provider.upper()}: {exc}")
-
-        if json_data is None:
-            notify_extraction_error(name, "All extraction attempts failed.")
-            return
-
-        try:
-            price         = float(json_data["current_price"])
-            product_title = str(json_data["product_title"])
-            stock_status  = str(json_data["stock_status"])
-        except (KeyError, TypeError, ValueError) as exc:
-            msg = f"Field read error: {exc} | json_data: {json_data}"
-            print(f"  ❌ {msg}")
-            notify_extraction_error(name, msg)
-            return
-
-        print(f"  Title:  {product_title}")
-        print(f"  Stock:  {stock_status}")
-
+    print(f"  Title:  {product_title}")
+    print(f"  Stock:  {stock_status}")
     print(f"  Price:  ${price:.2f}")
 
     # ── Sanity guard ───────────────────────────────────────────────────────────
@@ -366,6 +379,14 @@ def check_product(provider: str, client, product: dict) -> None:
     else:
         gap = price - threshold
         print(f"  ✅ Above threshold by ${gap:.2f} — no alert.")
+
+
+def run_extraction_flow(provider: str, client, products: list[dict]) -> dict[str, dict | None]:
+    """Execute extraction for all products and collect results."""
+    results = {}
+    for product in products:
+        results[product["name"]] = extract_product_data(provider, client, product)
+    return results
 
 
 # ── Entry Point ────────────────────────────────────────────────────────────────
@@ -395,8 +416,35 @@ def main() -> None:
     provider, client = select_provider(min_credits)
     print()
 
+    # ── First extraction flow ──────────────────────────────────────────────────
+    print("── Extraction flow (attempt 1) ──")
+    results = run_extraction_flow(provider, client, products)
+
+    # ── Full-flow retry on total failure ───────────────────────────────────────
+    if all(v is None for v in results.values()):
+        if IS_TEST:
+            print("\n⚠️ All products failed, but running in testing mode — skipping 2-hour retry sleep.")
+            for product in products:
+                notify_extraction_error(product["name"], "All extraction attempts failed (test mode).")
+            sys.exit(1)
+
+        wait_hours = FLOW_RETRY_WAIT // 3600
+        print(f"\n⏳ All products failed. Retrying entire flow in {wait_hours}h...")
+        time.sleep(FLOW_RETRY_WAIT)
+
+        print("\n── Extraction flow (attempt 2 — after retry wait) ──")
+        results = run_extraction_flow(provider, client, products)
+
+        if all(v is None for v in results.values()):
+            print("\n❌ Retry flow also failed. Sending error notifications.")
+            for product in products:
+                notify_extraction_error(product["name"], "All extraction attempts failed.")
+            sys.exit(1)
+
+    # ── Process results (validate and notify) ──────────────────────────────────
     for product in products:
-        check_product(provider, client, product)
+        json_data = results.get(product["name"])
+        process_product_result(product, json_data)
         print()
 
     print("✅ All checks complete.")

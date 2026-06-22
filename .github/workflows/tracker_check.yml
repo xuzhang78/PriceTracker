@@ -85,6 +85,7 @@ jobs:
           FIRECRAWL_API_KEY: ${{ secrets.FIRECRAWL_API_KEY }}
           NTFY_TOPIC:        ${{ secrets.NTFY_TOPIC }}
           INCLUDE_EXPIRED:   ${{ inputs.include_expired || 'false' }}
+          TESTING:           ${{ github.event_name == 'workflow_dispatch' && 'true' || 'false' }}
         run: python check_deals.py
 
 # ── Subagent: B&H Price Check ──────────────────────────────────────────────────
@@ -139,4 +140,5 @@ jobs:
           NTFY_TOPIC:        ${{ secrets.NTFY_TOPIC }}
           PRICE_OVERRIDE:    ${{ inputs.price_override }}
           REPORT_MODE:       ${{ inputs.report_mode || 'false' }}
+          TESTING:           ${{ github.event_name == 'workflow_dispatch' && 'true' || 'false' }}
         run: python check_prices.py
