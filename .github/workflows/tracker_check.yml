@@ -28,6 +28,10 @@ on:
         description: "B&H: simulate a price drop (e.g. 2499.00). Leave blank for live check."
         required: false
         default: ""
+      report_mode:
+        description: "B&H: set 'true' to do real extraction and always notify with actual price (pipeline verification)"
+        required: false
+        default: "false"
 
 # ── Subagent: Dealmoon BOGO ────────────────────────────────────────────────────
 jobs:
@@ -131,4 +135,5 @@ jobs:
           SGAI_API_KEY:   ${{ secrets.SGAI_API_KEY }}
           NTFY_TOPIC:     ${{ secrets.NTFY_TOPIC }}
           PRICE_OVERRIDE: ${{ inputs.price_override }}
+          REPORT_MODE:    ${{ inputs.report_mode || 'false' }}
         run: python check_prices.py

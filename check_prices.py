@@ -32,6 +32,7 @@ SGAI_API_KEY = os.getenv("SGAI_API_KEY", "")
 NTFY_TOPIC = os.getenv("NTFY_TOPIC", "")
 _price_override_raw = os.getenv("PRICE_OVERRIDE", "").strip()
 PRICE_OVERRIDE: float | None = float(_price_override_raw) if _price_override_raw else None
+REPORT_MODE = os.getenv("REPORT_MODE", "false").strip().lower() == "true"
 
 # Prices outside this range indicate a failed / blocked extraction
 MIN_VALID_PRICE = 100.0
@@ -73,9 +74,22 @@ def notify_price_drop(product_title: str, price: float, stock_status: str, url: 
         title="B&H MacBook Price Drop!",
         body=f"Price dropped to ${price:.2f}\n{product_title}\nStock: {stock_status}\n{url}",
         priority="high",
-        tags="rotating_light,apple,moneybag",  # ntfy renders these as emoji in the app
+        tags="rotating_light,apple,moneybag",
     )
     print("    ✅ Price drop alert sent via ntfy!")
+
+
+def notify_price_report(product_title: str, price: float, threshold: float, stock_status: str, url: str) -> None:
+    """Send a report-mode notification with the real extracted price for pipeline verification."""
+    gap = price - threshold
+    vs_threshold = f"${gap:+.2f} vs threshold ${threshold:.2f}"
+    _send_ntfy(
+        title=f"[Report] B&H Price Check",
+        body=f"Current price: ${price:.2f}\n{vs_threshold}\n{product_title}\nStock: {stock_status}\n{url}",
+        priority="default",
+        tags="chart_with_upwards_trend,apple",
+    )
+    print(f"    📊 Price report sent via ntfy! (${price:.2f}, {vs_threshold})")
 
 
 def notify_extraction_error(product_name: str, reason: str) -> None:
@@ -212,9 +226,14 @@ def check_product(sgai: ScrapeGraphAI, product: dict) -> None:
         return
 
     # ── Price threshold check ──────────────────────────────────────────────────
-    if price < threshold:
+    display_title = product_title if PRICE_OVERRIDE is None else name
+
+    if REPORT_MODE:
+        # Test mode: real extraction already happened — always notify with actual price
+        print(f"  📊 REPORT MODE — sending price report regardless of threshold.")
+        notify_price_report(display_title, price, threshold, stock_status, url)
+    elif price < threshold:
         print(f"  🚨 BELOW THRESHOLD — sending alert!")
-        display_title = product_title if PRICE_OVERRIDE is None else name
         notify_price_drop(display_title, price, stock_status, url)
     else:
         gap = price - threshold
@@ -231,6 +250,8 @@ def main() -> None:
         print("   Set them in your .env file (local) or GitHub Secrets (CI).")
         sys.exit(1)
 
+    if REPORT_MODE:
+        print(f"📊 Running in REPORT MODE — real extraction, always notify with actual price.\n")
     if PRICE_OVERRIDE is not None:
         print(f"⚠️  Running in SIMULATION mode — PRICE_OVERRIDE=${PRICE_OVERRIDE:.2f}\n")
 
