@@ -201,47 +201,25 @@ MAX_RETRIES   = 3
 RETRY_DELAYS  = [15, 30, 60]
 
 
-def _extract_price_sgai(client, url: str) -> dict | None:
-    """Single-product SGAI extraction with retry. Returns json_data dict or None."""
-    from scrapegraph_py import FetchConfig
-
-    last_error = ""
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            result = client.extract(
-                url=url,
-                schema=MacBookProductSchema.model_json_schema(),
-                prompt=_PRICE_PROMPT,
-                fetch_config=FetchConfig(mode="js", stealth=True, wait=2000),
-            )
-            break
-        except Exception as exc:
-            last_error = str(exc)
-            if attempt < MAX_RETRIES:
-                delay = RETRY_DELAYS[attempt - 1]
-                print(f"  ⚠️  SGAI attempt {attempt}/{MAX_RETRIES} failed ({exc}). Retrying in {delay}s...")
-                time.sleep(delay)
-            else:
-                print(f"  ❌ SGAI: all {MAX_RETRIES} attempts failed. Last error: {exc}")
-                return None
+def _extract_price_once(provider: str, client, url: str) -> dict | None:
+    """Perform a single-attempt extraction using either ScrapeGraphAI or Firecrawl."""
+    if provider == "sgai":
+        from scrapegraph_py import FetchConfig
+        result = client.extract(
+            url=url,
+            schema=MacBookProductSchema.model_json_schema(),
+            prompt=_PRICE_PROMPT,
+            fetch_config=FetchConfig(mode="js", stealth=True, wait=2000),
+        )
+        if result.status == "error":
+            print(f"      ⚠️  SGAI error: {result.error}")
+            return None
+        json_data = result.data.json_data
+        if not json_data:
+            print(f"      ⚠️  SGAI: json_data empty or malformed.")
+            return None
+        return json_data
     else:
-        return None
-
-    if result.status == "error":
-        print(f"  ❌ SGAI extraction error: {result.error}")
-        return None
-
-    json_data = result.data.json_data
-    if not json_data:
-        print(f"  ❌ SGAI: json_data is empty. raw: {result.data.raw}")
-        return None
-
-    return json_data
-
-
-def _extract_price_firecrawl(client, url: str) -> dict | None:
-    """Single-product Firecrawl extraction. Returns dict with price fields or None."""
-    try:
         result = client.extract(
             urls=[url],
             prompt=_PRICE_PROMPT,
@@ -267,15 +245,45 @@ def _extract_price_firecrawl(client, url: str) -> dict | None:
             if isinstance(c, dict) and "current_price" in c:
                 return c
 
-        print(f"  ⚠️  Firecrawl: unrecognised response format.")
-        print(f"  Raw: {str(result)[:300]}")
-        return None
-    except Exception as exc:
-        print(f"  ⚠️  Firecrawl exception: {exc}")
+        print(f"      ⚠️  Firecrawl: unrecognised response format.")
+        print(f"      Raw: {str(result)[:300]}")
         return None
 
 
-# ── Core Logic ─────────────────────────────────────────────────────────────────
+def try_extract_product(
+    provider: str,
+    client,
+    product: dict,
+    label: str = "",
+) -> dict | None:
+    """
+    Attempt price extraction for a single product up to MAX_RETRIES times.
+    Returns the extracted dict, or None if all attempts fail.
+    """
+    name  = product["name"]
+    url   = product["url"]
+    tag   = f" [{label}]" if label else ""
+
+    print(f"\n→ {name}{tag} [{provider.upper()}]")
+    print(f"  URL: {url}")
+
+    for attempt in range(1, MAX_RETRIES + 1):
+        print(f"  Attempt {attempt}/{MAX_RETRIES}...")
+        try:
+            data = _extract_price_once(provider, client, url)
+            if data is not None:
+                return data
+        except Exception as exc:
+            print(f"      ⚠️  {provider.upper()} exception: {exc}")
+
+        if attempt < MAX_RETRIES:
+            delay = RETRY_DELAYS[attempt - 1]
+            print(f"  Waiting {delay}s before retry...")
+            time.sleep(delay)
+
+    print(f"  ❌ All {MAX_RETRIES} attempts failed for {name} via {provider.upper()}.")
+    return None
+
 
 def load_active_products() -> list[dict]:
     """Load tracker_config.json and return only bh_price entries where active == true."""
@@ -291,7 +299,6 @@ def extract_product_data(provider: str, client, product: dict) -> dict | None:
     Returns extracted data dict or None on failure.
     """
     name: str = product["name"]
-    url:  str = product["url"]
 
     # ── Simulation mode ────────────────────────────────────────────────────────
     if PRICE_OVERRIDE is not None:
@@ -301,31 +308,32 @@ def extract_product_data(provider: str, client, product: dict) -> dict | None:
             "stock_status": "Simulated"
         }
 
-    # ── Live extraction mode ───────────────────────────────────────────────────
-    if provider == "sgai":
-        json_data = _extract_price_sgai(client, url)
-    else:
-        json_data = _extract_price_firecrawl(client, url)
+    # Try primary provider
+    res = try_extract_product(provider, client, product)
+    if res is not None:
+        return res
 
-    # Dynamic fallback if first attempt failed
-    if json_data is None:
-        secondary_provider = "firecrawl" if provider == "sgai" else "sgai"
-        secondary_key = FIRECRAWL_API_KEY if secondary_provider == "firecrawl" else SGAI_API_KEY
-        if secondary_key:
-            print(f"  🔄 Primary [{provider.upper()}] failed. Falling back to [{secondary_provider.upper()}]...")
-            try:
-                if secondary_provider == "firecrawl":
-                    from firecrawl import FirecrawlApp
-                    sec_client = FirecrawlApp(api_key=FIRECRAWL_API_KEY)
-                    json_data = _extract_price_firecrawl(sec_client, url)
-                else:
-                    from scrapegraph_py import ScrapeGraphAI
-                    sec_client = ScrapeGraphAI(api_key=SGAI_API_KEY)
-                    json_data = _extract_price_sgai(sec_client, url)
-            except Exception as exc:
-                print(f"  ⚠️  Failed to initialize or extract via fallback provider {secondary_provider.upper()}: {exc}")
+    # Try secondary provider fallback
+    secondary_provider = "firecrawl" if provider == "sgai" else "sgai"
+    secondary_key = FIRECRAWL_API_KEY if secondary_provider == "firecrawl" else SGAI_API_KEY
 
-    return json_data
+    if secondary_key:
+        print(f"\n🔄 Primary [{provider.upper()}] failed for {name}. Falling back to [{secondary_provider.upper()}]...")
+        try:
+            if secondary_provider == "firecrawl":
+                from firecrawl import FirecrawlApp
+                sec_client = FirecrawlApp(api_key=FIRECRAWL_API_KEY)
+            else:
+                from scrapegraph_py import ScrapeGraphAI
+                sec_client = ScrapeGraphAI(api_key=SGAI_API_KEY)
+
+            res = try_extract_product(secondary_provider, sec_client, product, "fallback")
+            if res is not None:
+                return res
+        except Exception as exc:
+            print(f"  ⚠️  Failed to initialize or extract via fallback provider {secondary_provider.upper()}: {exc}")
+
+    return None
 
 
 def process_product_result(product: dict, json_data: dict | None) -> None:
