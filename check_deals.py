@@ -62,9 +62,9 @@ MAX_RETRIES           = 3
 RETRY_DELAYS          = [15, 30]
 FLOW_RETRY_WAIT       = 2 * 3600
 
-BASE_DIR    = os.path.dirname(__file__)
-CONFIG_PATH = os.path.join(BASE_DIR, "deals_config.json")
-STATE_PATH  = os.path.join(BASE_DIR, "deals_state.json")
+BASE_DIR     = os.path.dirname(__file__)
+CONFIG_PATH  = os.path.join(BASE_DIR, "tracker_config.json")   # unified config
+STATE_PATH   = os.path.join(BASE_DIR, "deals_state.json")
 
 
 # ── Pydantic Schema ────────────────────────────────────────────────────────────
@@ -476,11 +476,13 @@ def main() -> None:
         print("⚠️  Running in INCLUDE_EXPIRED mode — expired deals processed for E2E testing.\n")
 
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-        all_brands = json.load(f)
+        config = json.load(f)
 
+    # Filter only dealmoon_bogo entries from the unified tracker_config.json
+    all_brands    = [t for t in config.get("trackers", []) if t.get("type") == "dealmoon_bogo"]
     active_brands = [b for b in all_brands if b.get("active", True)]
     if not active_brands:
-        print("No active brands in deals_config.json. Nothing to check.")
+        print("No active dealmoon_bogo entries in tracker_config.json. Nothing to check.")
         sys.exit(0)
 
     brand_names = [b["brand"] for b in active_brands]

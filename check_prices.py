@@ -108,11 +108,12 @@ def notify_extraction_error(product_name: str, reason: str) -> None:
 # ── Core Logic ─────────────────────────────────────────────────────────────────
 
 def load_active_products() -> list[dict]:
-    """Load products.json and return only entries where active == true."""
-    products_path = os.path.join(os.path.dirname(__file__), "products.json")
-    with open(products_path, "r", encoding="utf-8") as f:
-        all_products = json.load(f)
-    return [p for p in all_products if p.get("active", True)]
+    """Load tracker_config.json and return only bh_price entries where active == true."""
+    config_path = os.path.join(os.path.dirname(__file__), "tracker_config.json")
+    with open(config_path, "r", encoding="utf-8") as f:
+        config = json.load(f)
+    all_products = [t for t in config.get("trackers", []) if t.get("type") == "bh_price"]
+    return [p for p in all_products if p.get("active", False)]
 
 
 def check_product(sgai: ScrapeGraphAI, product: dict) -> None:

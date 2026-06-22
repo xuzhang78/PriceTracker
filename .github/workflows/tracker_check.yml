@@ -1,0 +1,66 @@
+name: Price & Deal Tracker
+
+on:
+  # Runs daily at 10:00 UTC (6:00 AM EDT).
+  # Each tracker type is only executed if it has at least one active entry
+  # in tracker_config.json — no wasted runner minutes otherwise.
+  schedule:
+    - cron: "0 10 * * *"
+
+  # Manual trigger — supports both Dealmoon E2E testing and B&H price simulation.
+  workflow_dispatch:
+    inputs:
+      include_expired:
+        description: "Dealmoon: set 'true' to include expired deals (E2E pipeline test)"
+        required: false
+        default: "false"
+      price_override:
+        description: "B&H: simulate a price drop (e.g. 2499.00). Leave blank for live check."
+        required: false
+        default: ""
+
+jobs:
+  run-trackers:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Check for active trackers
+        id: check_active
+        run: |
+          dealmoon=$(jq '[.trackers[] | select(.type == "dealmoon_bogo" and .active == true)] | length' tracker_config.json)
+          bh=$(jq '[.trackers[] | select(.type == "bh_price" and .active == true)] | length' tracker_config.json)
+
+          [ "$dealmoon" -gt 0 ] && dm_flag=true || dm_flag=false
+          [ "$bh" -gt 0 ]       && bh_flag=true || bh_flag=false
+
+          echo "dealmoon_active=$dm_flag" >> $GITHUB_OUTPUT
+          echo "bh_active=$bh_flag"       >> $GITHUB_OUTPUT
+          echo "Dealmoon BOGO brands: $dealmoon active | B&H products: $bh active"
+
+      - uses: actions/setup-python@v6
+        if: steps.check_active.outputs.dealmoon_active == 'true' || steps.check_active.outputs.bh_active == 'true'
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        if: steps.check_active.outputs.dealmoon_active == 'true' || steps.check_active.outputs.bh_active == 'true'
+        run: pip install -r requirements.txt
+
+      - name: Run Dealmoon BOGO check
+        if: steps.check_active.outputs.dealmoon_active == 'true'
+        env:
+          SGAI_API_KEY:      ${{ secrets.SGAI_API_KEY }}
+          FIRECRAWL_API_KEY: ${{ secrets.FIRECRAWL_API_KEY }}
+          NTFY_TOPIC:        ${{ secrets.NTFY_TOPIC }}
+          INCLUDE_EXPIRED:   ${{ inputs.include_expired || 'false' }}
+        run: python check_deals.py
+
+      - name: Run B&H price check
+        if: steps.check_active.outputs.bh_active == 'true'
+        env:
+          SGAI_API_KEY:   ${{ secrets.SGAI_API_KEY }}
+          NTFY_TOPIC:     ${{ secrets.NTFY_TOPIC }}
+          PRICE_OVERRIDE: ${{ inputs.price_override }}
+        run: python check_prices.py

@@ -1,0 +1,33 @@
+{
+  "trackers": [
+    {
+      "type": "dealmoon_bogo",
+      "brand": "Lancome",
+      "url": "https://www.dealmoon.com/en/top/lancome?type=1&click=0&sort=relevance&expiredClick=n&exp=y&sid=968",
+      "keywords": ["buy one get one", "bogo", "b1g1", "buy 1 get 1", "buy one, get one"],
+      "active": true
+    },
+    {
+      "type": "dealmoon_bogo",
+      "brand": "Clinique",
+      "url": "https://www.dealmoon.com/en/top/clinique?type=1&click=0&sort=relevance&expiredClick=n&exp=y&sid=184",
+      "keywords": ["buy one get one", "bogo", "b1g1", "buy 1 get 1", "buy one, get one"],
+      "active": true
+    },
+    {
+      "type": "bh_price",
+      "name": "MacBook Pro M5 Silver 14\"",
+      "url": "https://www.bhphotovideo.com/c/product/1957138-REG/apple_mbp_m5p_32_14_macbook_pro_m5.html",
+      "threshold": 2700.00,
+      "active": false,
+      "note": "Out of stock as of 2026-05-31. Was briefly on sale at $2699. Re-enable when back in stock."
+    },
+    {
+      "type": "bh_price",
+      "name": "MacBook Pro M5 Space Black 14\"",
+      "url": "https://www.bhphotovideo.com/c/product/1957137-REG/apple_mbp_m5p_31_14_macbook_pro_m5.html",
+      "threshold": 2700.00,
+      "active": false
+    }
+  ]
+}
