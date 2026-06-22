@@ -133,14 +133,14 @@ When a new active BOGO deal is found, you will receive a push notification.
 
 ## Managing Deals Configuration
 
-Brand configurations are in [`deals_config.json`](./deals_config.json). No code changes needed.
+Brand configurations are in [`tracker_config.json`](./tracker_config.json). No code changes needed.
 
 ### Add a new brand
 ```json
 {
+  "type": "dealmoon_bogo",
   "brand": "Estee Lauder",
   "url": "https://www.dealmoon.com/en/top/estee-lauder?type=1&...",
-  "fallback_url": "https://www.dealmoon.com/en/top/estee-lauder",
   "keywords": ["buy one get one", "bogo", "b1g1", "buy 1 get 1"],
   "active": true
 }
@@ -159,11 +159,12 @@ Brand configurations are in [`deals_config.json`](./deals_config.json). No code 
 
 ## Managing Price Products
 
-Products are configured in [`products.json`](./products.json).
+Products are configured in [`tracker_config.json`](./tracker_config.json).
 
 ### Re-enable a paused MacBook product
 ```json
 {
+  "type": "bh_price",
   "name": "MacBook Pro M5 Space Black 14\"",
   "url": "https://...",
   "threshold": 2700.00,
@@ -175,13 +176,17 @@ Products are configured in [`products.json`](./products.json).
 
 ## Credit Usage
 
-| Tracker | Schedule | Calls/month | Credits/month |
+| Tracker | Schedule | Cost per Run | Credits/month |
 |---|---|---|---|
-| BOGO Tracker (2 brands) | Daily | 60 | 600 |
-| MacBook Tracker | Paused | 0 | 0 |
-| **Total** | | **60** | **600** |
+| BOGO Tracker (2 brands) | Daily | 10 (SGAI) / 5 (Firecrawl) per brand | ~300 - 600 |
+| MacBook Tracker (2 products) | Daily | 1 per HTML scrape (SGAI or Firecrawl) | ~60 |
+| **Total** | | | **~360 - 660** |
 
-The free plan provides **500 credits/month + 500 one-time bonus**. The one-time buffer covers the first month's overage of 100 credits. A **$5 one-time top-up** (1,000 non-expiring credits) provides a comfortable ongoing buffer.
+### Guidelines & Overage Prevention
+- **HTML-Only Scraping**: The MacBook Price Tracker retrieves raw HTML (1 credit) and parses the page using stable regex tags. If the regex parsing fails, it automatically falls back to LLM structured extraction.
+- **Dynamic Retry Limit**: In testing/E2E modes (`IS_TEST` is true), retry attempts are capped at `1` to prevent runaway credit usage on scraping failures.
+- **Testing Credit Preservation**: Limit the use of full scraper test runs to manual/essential verifications. For downstream pipeline testing (such as notifications), use simulation overrides (e.g. `PRICE_OVERRIDE=2499.00 python check_prices.py`) which bypasses external scraping APIs completely.
+- **SGAI & Firecrawl Fallback**: If SGAI credits are depleted, the tracker automatically falls back to Firecrawl. Make sure both `SGAI_API_KEY` and `FIRECRAWL_API_KEY` are configured.
 
 ---
 
