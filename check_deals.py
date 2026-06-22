@@ -62,7 +62,7 @@ TESTING             = os.getenv("TESTING", "false").strip().lower() == "true"
 IS_TEST             = INCLUDE_EXPIRED or TESTING
 
 SGAI_CREDITS_PER_CALL = 10      # credits consumed per SGAI extract call
-MAX_RETRIES           = 3
+MAX_RETRIES           = 1 if IS_TEST else 3
 RETRY_DELAYS          = [15, 30]
 FLOW_RETRY_WAIT       = 2 * 3600
 

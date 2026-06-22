@@ -201,12 +201,113 @@ _PRICE_PROMPT = (
     "float (no currency symbols, no commas), and the stock availability status."
 )
 
-MAX_RETRIES   = 3
+MAX_RETRIES   = 1 if IS_TEST else 3
 RETRY_DELAYS  = [15, 30, 60]
+
+
+def parse_bh_product_html(html: str) -> dict | None:
+    """Parses B&H product HTML using data-selenium attributes."""
+    import re
+    import html as html_lib
+
+    # 1. Product Title (data-selenium="productTitle" on h1)
+    title_match = re.search(r'data-selenium="productTitle"[^>]*>(.*?)</h1>', html, re.DOTALL)
+    title = title_match.group(1).strip() if title_match else ""
+
+    # 2. Stock Status (data-selenium="stockStatus" on span)
+    stock_match = re.search(r'data-selenium="stockStatus"[^>]*>(.*?)</span>', html, re.DOTALL)
+    stock = stock_match.group(1).strip() if stock_match else ""
+
+    # 3. Current Price (data-selenium="pricingPrice" on span)
+    price_match = re.search(r'data-selenium="pricingPrice"[^>]*>(.*?)</span>', html, re.DOTALL)
+    price = 0.0
+    if price_match:
+        price_str = price_match.group(1).strip()
+        # Clean currency symbols and commas
+        price_str = re.sub(r'[^\d.]', '', price_str)
+        try:
+            price = float(price_str)
+        except ValueError:
+            pass
+
+    # Fallback to standard h1 tag if data-selenium title is missing
+    if not title:
+        fallback_h1 = re.search(r'<h1[^>]*>(.*?)</h1>', html, re.DOTALL)
+        if fallback_h1:
+            title = fallback_h1.group(1).strip()
+
+    # Clean HTML tags and entities
+    if title:
+        title = html_lib.unescape(title)
+        title = re.sub(r'<[^>]*>', '', title)
+        title = title.strip()
+
+    if stock:
+        stock = html_lib.unescape(stock)
+        stock = re.sub(r'<[^>]*>', '', stock)
+        stock = stock.strip()
+
+    if not title:
+        return None
+
+    return {
+        "product_title": title,
+        "current_price": price,
+        "stock_status": stock or "Unknown"
+    }
 
 
 def _extract_price_once(provider: str, client, url: str) -> dict | None:
     """Perform a single-attempt extraction using either ScrapeGraphAI or Firecrawl."""
+    html_content = None
+
+    if provider == "sgai":
+        from scrapegraph_py import FetchConfig, HtmlFormatConfig
+        try:
+            print("      🔍 SGAI: Fetching raw HTML (1 credit)...")
+            result = client.scrape(
+                url=url,
+                formats=[HtmlFormatConfig(mode="normal")],
+                fetch_config=FetchConfig(mode="js", stealth=True, wait=2000),
+            )
+            if result.status == "error":
+                print(f"      ⚠️  SGAI html scrape error: {result.error}")
+            elif hasattr(result, "data") and result.data is not None:
+                results_dict = getattr(result.data, "results", {})
+                html_dict = results_dict.get("html", {})
+                if isinstance(html_dict, dict):
+                    html_content = html_dict.get("data")
+                else:
+                    html_content = html_dict
+        except Exception as exc:
+            print(f"      ⚠️  SGAI html scrape exception: {exc}")
+    else:
+        try:
+            print("      🔍 Firecrawl: Fetching raw HTML (1 credit)...")
+            doc = client.scrape(
+                url,
+                formats=["html"]
+            )
+            if hasattr(doc, "html") and doc.html:
+                html_content = doc.html
+            elif isinstance(doc, dict) and "html" in doc:
+                html_content = doc["html"]
+        except Exception as exc:
+            print(f"      ⚠️  Firecrawl html scrape exception: {exc}")
+
+    # Parse HTML using regex
+    if html_content:
+        parsed = parse_bh_product_html(html_content)
+        if parsed and parsed.get("product_title") and parsed.get("current_price") > 0.0:
+            print(f"      🎯 {provider.upper()}: Successfully parsed product details via HTML regex (Save successful!).")
+            return parsed
+        else:
+            print(f"      ⚠️  {provider.upper()}: Regex parsing returned incomplete data (Title: {parsed.get('product_title') if parsed else 'None'}, Price: {parsed.get('current_price') if parsed else 'None'}).")
+    else:
+        print(f"      ⚠️  {provider.upper()}: Failed to fetch HTML content.")
+
+    # Fallback to LLM structured extraction if html-only scrape or regex parsing failed
+    print(f"      🔄 {provider.upper()}: Falling back to LLM structured extraction...")
     if provider == "sgai":
         from scrapegraph_py import FetchConfig
         result = client.extract(
@@ -216,11 +317,11 @@ def _extract_price_once(provider: str, client, url: str) -> dict | None:
             fetch_config=FetchConfig(mode="js", stealth=True, wait=2000),
         )
         if result.status == "error":
-            print(f"      ⚠️  SGAI error: {result.error}")
+            print(f"      ⚠️  SGAI LLM fallback error: {result.error}")
             return None
         json_data = result.data.json_data
         if not json_data:
-            print(f"      ⚠️  SGAI: json_data empty or malformed.")
+            print(f"      ⚠️  SGAI: LLM fallback json_data empty or malformed.")
             return None
         return json_data
     else:
@@ -237,7 +338,7 @@ def _extract_price_once(provider: str, client, url: str) -> dict | None:
         if hasattr(doc, "json") and doc.json is not None:
             if isinstance(doc.json, dict) and "current_price" in doc.json:
                 return doc.json
-        print("      ⚠️  Firecrawl: 'json' field empty or malformed.")
+        print("      ⚠️  Firecrawl: LLM fallback 'json' field empty or malformed.")
         return None
 
 
