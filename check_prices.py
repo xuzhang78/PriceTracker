@@ -45,7 +45,7 @@ REPORT_MODE         = os.getenv("REPORT_MODE", "false").strip().lower() == "true
 TESTING             = os.getenv("TESTING", "false").strip().lower() == "true"
 IS_TEST             = (PRICE_OVERRIDE is not None) or REPORT_MODE or TESTING
 
-SGAI_CREDITS_PER_CALL = 10       # credits consumed per SGAI extract call
+SGAI_CREDITS_PER_CALL = 1        # credits consumed per SGAI html-only scrape (Optimization B)
 FLOW_RETRY_WAIT       = 2 * 3600
 
 # Prices outside this range indicate a failed / blocked extraction
@@ -84,6 +84,7 @@ def _send_ntfy(title: str, body: str, priority: str = "default", tags: str = "")
             print(f"    ⚠️  ntfy send attempt {attempt}/3 failed: {exc}")
             if attempt < 3:
                 time.sleep(5)
+    print(f"    ❌ ntfy: all 3 attempts failed — alert '{safe_title}' was NOT delivered.")
 
 
 def notify_price_drop(product_title: str, price: float, stock_status: str, url: str) -> None:

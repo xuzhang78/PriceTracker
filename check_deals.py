@@ -138,6 +138,7 @@ def _send_ntfy(title: str, body: str, priority: str = "default", tags: str = "")
             print(f"    ⚠️  ntfy send attempt {attempt}/3 failed: {exc}")
             if attempt < 3:
                 time.sleep(5)
+    print(f"    ❌ ntfy: all 3 attempts failed — alert '{safe_title}' was NOT delivered.")
 
 
 def notify_bogo_deal(brand: str, deal_title: str, description: str, deal_date: str) -> None:
