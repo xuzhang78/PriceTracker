@@ -1,12 +1,12 @@
 name: B&H MacBook Price Check
 
 on:
-  # Runs every day at 09:00 UTC
-  schedule:
-    - cron: "0 9 * * *"
+  # Daily cron DISABLED — MacBook tracking is currently paused (all products active: false).
+  # To re-enable: uncomment the two lines below and set products active: true in products.json.
+  # schedule:
+  #   - cron: "0 9 * * *"
 
-  # Allows manual trigger from the GitHub Actions UI
-  # Use the price_override input to simulate a price drop and test notifications
+  # Manual trigger still available for ad-hoc checks or testing
   workflow_dispatch:
     inputs:
       price_override:
