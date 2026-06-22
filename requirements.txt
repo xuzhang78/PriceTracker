@@ -1,3 +1,4 @@
 scrapegraph-py>=2.1.0
+firecrawl-py>=1.0.0
 python-dotenv>=1.0.0
 requests>=2.31.0

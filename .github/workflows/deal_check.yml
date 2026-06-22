@@ -26,7 +26,8 @@ jobs:
 
       - name: Run BOGO deal check
         env:
-          SGAI_API_KEY:     ${{ secrets.SGAI_API_KEY }}
-          NTFY_TOPIC:       ${{ secrets.NTFY_TOPIC }}
-          INCLUDE_EXPIRED:  ${{ inputs.include_expired || 'false' }}
+          SGAI_API_KEY:       ${{ secrets.SGAI_API_KEY }}
+          FIRECRAWL_API_KEY:  ${{ secrets.FIRECRAWL_API_KEY }}
+          NTFY_TOPIC:         ${{ secrets.NTFY_TOPIC }}
+          INCLUDE_EXPIRED:    ${{ inputs.include_expired || 'false' }}
         run: python check_deals.py
