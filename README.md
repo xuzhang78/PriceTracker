@@ -15,7 +15,7 @@ Sends a high-priority push notification the moment a new active BOGO deal is det
 ```
 GitHub Actions (daily 10:00 UTC)
     └── check_deals.py
-            ├── select provider (SGAI or Firecrawl)
+            ├── select provider (Firecrawl primary)
             ├── extract page deals (including raw HTML on Firecrawl)
             ├── parse Unix timestamps from HTML to resolve dates
             └── BOGO keyword match + new deal → ntfy.sh → 📱 your phone
@@ -24,7 +24,7 @@ GitHub Actions (daily 10:00 UTC)
 **Key features:**
 - **Exact Date Parsing**: Fallback to raw HTML parsing to capture real timestamps (`t="..."`) and map them to LLM-extracted deals.
 - **Dynamic Testing Pagination**: Automatically paginates up to 3 pages in E2E testing mode if no BOGO deal is found on page 1.
-- **Robust Provider Gating**: Intelligent fallback from SGAI to Firecrawl when credits are depleted.
+- **Robust Provider Gating**: Runs via Firecrawl with automatic fallback options.
 - **State deduplication**: `deals_state.json` tracks notified deals to prevent spam.
 
 ---
@@ -36,7 +36,7 @@ Monitors B&H Photo for MacBook Pro M5 price drops below a configured threshold.
 ```
 GitHub Actions (daily 09:00 UTC)
     └── check_prices.py
-            ├── select provider (SGAI or Firecrawl)
+            ├── select provider (Firecrawl primary)
             ├── extract MacBook price details (HTML regex + LLM fallback)
             └── price < threshold → ntfy.sh → 📱 your phone
 ```
@@ -51,7 +51,7 @@ Uses LLM-only extraction (no regex) with a prompt engineered to capture the **si
 ```
 GitHub Actions (daily 09:00 UTC)
     └── check_prices.py
-            ├── select provider (SGAI or Firecrawl)
+            ├── select provider (Firecrawl primary)
             ├── extract iPhone price details (LLM structured extraction)
             └── price < threshold → ntfy.sh → 📱 your phone
 ```
@@ -66,8 +66,9 @@ All configurations are managed in the unified config file `tracker_config.json`.
 
 ## Prerequisites
 
-- Python 3.11+
-- A [ScrapeGraphAI](https://scrapegraphai.com/dashboard) account (free tier)
+- Python 3.12+ (since scrapegraph/firecrawl libraries require it)
+- A [Firecrawl](https://firecrawl.dev/) API key (free tier available)
+- Optional: A [ScraperAPI](https://www.scraperapi.com/) API key (backup proxy service, free tier available)
 - The [ntfy app](https://ntfy.sh) installed on your phone, subscribed to your topic
 
 ---
@@ -83,8 +84,9 @@ pip install -r requirements.txt
 ### Step 2 — Configure `.env` (local testing only)
 
 ```bash
-SGAI_API_KEY=sgai-xxxxxxxxxxxxxxxxxxxxxxxx   # from scrapegraphai.com/dashboard
-NTFY_TOPIC=your-ntfy-topic            # already set — use as-is
+FIRECRAWL_API_KEY=fc-xxxxxxxxxxxxxxxxxxxxxxxx   # from firecrawl.dev
+SCRAPERAPI_KEY=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx  # optional backup from scraperapi.com
+NTFY_TOPIC=your-ntfy-topic                 # already set — use as-is
 ```
 
 ### Step 3 — Add GitHub Secrets
@@ -93,7 +95,8 @@ In your GitHub repo: **Settings → Secrets and variables → Actions → New re
 
 | Name | Value |
 |---|---|
-| `SGAI_API_KEY` | Your ScrapeGraphAI API key |
+| `FIRECRAWL_API_KEY` | Your Firecrawl API key |
+| `SCRAPERAPI_KEY` | (Optional) Your ScraperAPI API key (backup proxy) |
 | `NTFY_TOPIC` | Your ntfy topic name |
 
 ---
@@ -130,7 +133,7 @@ Expected: "Already notified — skipping duplicate alert." No push notification 
 # Real live price check
 python check_prices.py
 
-# Simulate a price drop (no SGAI call)
+# Simulate a price drop (no API calls)
 PRICE_OVERRIDE=2499.00 python check_prices.py
 ```
 
@@ -212,9 +215,9 @@ The `start_date` field (format: `YYYY-MM-DD`) delays tracking until that date. T
 
 Thanks to **Optimizations A & B**, our daily checks are highly cost-efficient:
 
-* **BOGO Tracker**: Uses structured JSON extraction (5 credits per request on Firecrawl fallback). Checking 2 brands daily consumes $2 \times 5 = 10$ credits/day.
-* **MacBook Price Tracker**: Uses HTML-only scraping and regex parsing (1 credit per request on Firecrawl/SGAI). Checking 2 products daily consumes $2 \times 1 = 2$ credits/day.
-* **iPhone Price Tracker**: Uses LLM structured extraction (10 credits per request). Checking 2 stores daily consumes $2 \times 10 = 20$ credits/day. **Dormant until 2026-09-01.**
+* **BOGO Tracker**: Uses structured JSON extraction (5 credits per request on Firecrawl). Checking 2 brands daily consumes $2 \times 5 = 10$ credits/day.
+* **MacBook Price Tracker**: Uses HTML-only scraping and regex parsing (1 credit per request on Firecrawl). Checking 2 products daily consumes $2 \times 1 = 2$ credits/day.
+* **iPhone Price Tracker**: Uses LLM structured extraction (10 credits per request on Firecrawl). Checking 2 stores daily consumes $2 \times 10 = 20$ credits/day. **Dormant until 2026-09-01.**
 
 | Tracker | Schedule | Requests/month | Credits/month | Status |
 |---|---|---|---|---|
@@ -223,10 +226,10 @@ Thanks to **Optimizations A & B**, our daily checks are highly cost-efficient:
 | iPhone Tracker (2 stores) | Daily | 60 | 600 | Starts Sep 1 |
 | **Total (when all active)** | | **180** | **960** | |
 
-> **Note:** With MacBook trackers paused and iPhone trackers dormant until Sep 1, current monthly usage is **~300 credits** (BOGO only). When the iPhone tracker activates, consider upgrading credits or reducing check frequency.
+> **Note:** ScrapeGraphAI (SGAI) is no longer checked or used due to one-time-only free credits. Firecrawl is the primary provider. If Firecrawl fails, the script automatically attempts **ScraperAPI** (if key is set) followed by completely free **local direct-request parsing** fallbacks.
 
 ### Optimization Highlights
-1. **B&H HTML Scraping**: The MacBook tracker queries Firecrawl or SGAI in html-only mode (1 credit instead of 5-10 credits) and parses data using regex, falling back to LLM structured extraction only on failure.
+1. **B&H HTML Scraping**: The MacBook tracker queries Firecrawl in html-only mode (1 credit instead of 5-10 credits) and parses data using regex, falling back to LLM structured extraction only on failure.
 2. **Capped Testing Retries (Optimization A)**: In test modes, retries are capped at `1` instead of `3` to prevent credit burn during failure debugging.
 3. **Smart Pagination**: Dealmoon crawls subsequent pages (up to page 3) only during testing mode when looking for historical BOGO matches. Daily production runs check page 1 only.
 4. **Start-date gating**: iPhone tracker entries use `start_date` to avoid burning credits before the product is available for purchase.
@@ -238,8 +241,8 @@ Thanks to **Optimizations A & B**, our daily checks are highly cost-efficient:
 | Symptom | Likely Cause | Fix |
 |---|---|---|
 | `HTTP 502/504` on extraction | Transient proxy timeout | Retry logic handles this automatically (3 attempts + fallback URL) |
-| `result.status == "error"` | SGAI credits exhausted or invalid key | Check dashboard credit balance |
+| `result.status == "error"` | Firecrawl credits exhausted or invalid key | Check Firecrawl dashboard credit balance |
 | No ntfy notification | Wrong topic name | Confirm topic in ntfy app matches `NTFY_TOPIC` in secrets |
-| BOGO deal not detected | Keywords don't match | Check `deals_config.json` keywords vs. actual deal text |
+| BOGO deal not detected | Keywords don't match | Check `tracker_config.json` keywords vs. actual deal text |
 | Duplicate alerts | State file reset or deleted | `deals_state.json` tracks notified deals — do not delete manually |
-| GitHub Actions not running | Workflow not triggered yet | Run manually via Actions tab first |
+| GitHub Actions running out of credits | Daily checks using too many credits | Pause MacBook trackers, set longer interval for iPhone trackers, or rely on zero-cost local fallbacks |

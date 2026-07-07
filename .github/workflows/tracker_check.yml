@@ -81,7 +81,6 @@ jobs:
       - name: Run Dealmoon BOGO check
         if: steps.gate.outputs.skip != 'true'
         env:
-          SGAI_API_KEY:      ${{ secrets.SGAI_API_KEY }}
           FIRECRAWL_API_KEY: ${{ secrets.FIRECRAWL_API_KEY }}
           NTFY_TOPIC:        ${{ secrets.NTFY_TOPIC }}
           INCLUDE_EXPIRED:   ${{ inputs.include_expired || 'false' }}
@@ -135,8 +134,8 @@ jobs:
       - name: Run price check
         if: steps.gate.outputs.skip != 'true'
         env:
-          SGAI_API_KEY:      ${{ secrets.SGAI_API_KEY }}
           FIRECRAWL_API_KEY: ${{ secrets.FIRECRAWL_API_KEY }}
+          SCRAPERAPI_KEY:    ${{ secrets.SCRAPERAPI_KEY }}
           NTFY_TOPIC:        ${{ secrets.NTFY_TOPIC }}
           PRICE_OVERRIDE:    ${{ inputs.price_override }}
           REPORT_MODE:       ${{ inputs.report_mode || 'false' }}

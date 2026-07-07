@@ -42,6 +42,7 @@ load_dotenv()
 
 SGAI_API_KEY        = os.getenv("SGAI_API_KEY", "")
 FIRECRAWL_API_KEY   = os.getenv("FIRECRAWL_API_KEY", "")
+SCRAPERAPI_KEY      = os.getenv("SCRAPERAPI_KEY", "")
 NTFY_TOPIC          = os.getenv("NTFY_TOPIC", "")
 _price_override_raw = os.getenv("PRICE_OVERRIDE", "").strip()
 PRICE_OVERRIDE: float | None = float(_price_override_raw) if _price_override_raw else None
@@ -49,7 +50,6 @@ REPORT_MODE         = os.getenv("REPORT_MODE", "false").strip().lower() == "true
 TESTING             = os.getenv("TESTING", "false").strip().lower() == "true"
 IS_TEST             = (PRICE_OVERRIDE is not None) or REPORT_MODE or TESTING
 
-SGAI_CREDITS_PER_CALL = 1        # credits consumed per SGAI html-only scrape (Optimization B)
 FLOW_RETRY_WAIT       = 2 * 3600
 
 # Prices outside this range indicate a failed / blocked extraction
@@ -144,76 +144,21 @@ def notify_extraction_error(product_name: str, reason: str) -> None:
     print("    ⚠️  Error alert sent via ntfy!")
 
 
-# ── Provider Selection (mirrors check_deals.py) ────────────────────────────────
+# ── Provider Selection ─────────────────────────────────────────────────────────
 
-def _check_sgai_credits() -> int:
+def select_provider() -> tuple[str, object]:
     """
-    Returns remaining SGAI credits as an integer.
-    Returns -1 if the check itself fails (network error, invalid key, etc.).
-    Returns  0 if credits are confirmed exhausted.
-    """
-    if not SGAI_API_KEY:
-        return -1
-    try:
-        from scrapegraph_py import ScrapeGraphAI
-        sgai = ScrapeGraphAI(api_key=SGAI_API_KEY)
-        info = sgai.credits()
-        # Handle nested data attribute first (new SDK format)
-        if hasattr(info, "data") and info.data is not None:
-            d = info.data
-            for field in ("remaining", "remaining_credits", "credits", "balance"):
-                if hasattr(d, field):
-                    return int(getattr(d, field))
-                if isinstance(d, dict) and field in d:
-                    return int(d[field])
-        if isinstance(info, (int, float)):
-            return int(info)
-        if isinstance(info, dict):
-            for field in ("remaining", "remaining_credits", "credits", "balance"):
-                if field in info:
-                    return int(info[field])
-        for attr in ("remaining", "remaining_credits", "credits", "balance"):
-            if hasattr(info, attr):
-                return int(getattr(info, attr))
-        print(f"  ⚠️  Unrecognised SGAI credits response: {info}")
-        return -1
-    except Exception as exc:
-        print(f"  ⚠️  SGAI credit check failed: {exc}")
-        return -1
-
-
-def select_provider(min_credits_needed: int) -> tuple[str, object]:
-    """
-    Selects extraction provider based on SGAI credit availability.
-      1. SGAI  — if credit balance >= min_credits_needed
-      2. Firecrawl — automatic fallback when SGAI credits are insufficient
-    Returns (provider_name, client). Exits with code 1 if neither is available.
+    Selects Firecrawl as the primary extraction provider.
     """
     print("🔌 Selecting extraction provider...")
 
-    remaining = _check_sgai_credits()
-
-    if remaining == -1:
-        if SGAI_API_KEY:
-            print("  ⚠️  SGAI credit check inconclusive — attempting SGAI anyway.")
-            from scrapegraph_py import ScrapeGraphAI
-            return "sgai", ScrapeGraphAI(api_key=SGAI_API_KEY)
-    elif remaining >= min_credits_needed:
-        print(f"  ✅ SGAI: {remaining} credits available (need {min_credits_needed}) → using SGAI")
-        from scrapegraph_py import ScrapeGraphAI
-        return "sgai", ScrapeGraphAI(api_key=SGAI_API_KEY)
-    else:
-        print(f"  ⚠️  SGAI: only {remaining} credits remaining (need {min_credits_needed})")
-
     if FIRECRAWL_API_KEY:
-        print("  ✅ Falling back to Firecrawl.")
+        print("  ✅ Firecrawl configured as primary provider.")
         from firecrawl import FirecrawlApp
         return "firecrawl", FirecrawlApp(api_key=FIRECRAWL_API_KEY)
 
-    print("❌ No extraction provider available.")
-    print("   • SGAI: credits exhausted or key missing → set SGAI_API_KEY")
-    print("   • Firecrawl: not configured → set FIRECRAWL_API_KEY")
-    sys.exit(1)
+    print("  ℹ️ Firecrawl is not configured. Relying on local fallbacks / ScraperAPI.")
+    return "local", None
 
 
 # ── Extraction ─────────────────────────────────────────────────────────────────
@@ -377,51 +322,47 @@ def _extract_iphone_price_once(provider: str, client, url: str) -> dict | None:
     Unlike B&H products, these sites have no stable data-selenium attributes
     for regex parsing, so we go straight to LLM structured extraction.
     """
+    if provider == "sgai":
+        return None
+
     schema = IPhoneProductSchema.model_json_schema()
     prompt = _IPHONE_PRICE_PROMPT
 
-    if provider == "sgai":
-        from scrapegraph_py import FetchConfig
-        try:
-            print("      🔍 SGAI: LLM structured extraction for iPhone...")
-            result = client.extract(
-                url=url,
-                schema=schema,
-                prompt=prompt,
-                fetch_config=FetchConfig(mode="js", stealth=True, wait=3000),
-            )
-            if result.status == "error":
-                print(f"      ⚠️  SGAI extraction error: {result.error}")
-                return None
-            json_data = result.data.json_data
-            if not json_data:
-                print("      ⚠️  SGAI: json_data empty or malformed.")
-                return None
-            return json_data
-        except Exception as exc:
-            print(f"      ⚠️  SGAI exception: {exc}")
-            return None
-    else:
-        try:
-            print("      🔍 Firecrawl: LLM structured extraction for iPhone...")
-            doc = client.scrape(
-                url,
-                formats=[
-                    {
-                        "type": "json",
-                        "schema": schema,
-                        "prompt": prompt
-                    }
-                ]
-            )
-            if hasattr(doc, "json") and doc.json is not None:
-                if isinstance(doc.json, dict) and "current_price" in doc.json:
-                    return doc.json
-            print("      ⚠️  Firecrawl: 'json' field empty or malformed.")
-            return None
-        except Exception as exc:
-            print(f"      ⚠️  Firecrawl exception: {exc}")
-            return None
+    try:
+        print(f"      🔍 Firecrawl: LLM structured extraction for iPhone (URL: {url})...")
+        scrape_params = {
+            "formats": [
+                {
+                    "type": "json",
+                    "schema": schema,
+                    "prompt": prompt
+                }
+            ]
+        }
+        
+        # Click the 512GB option on Verizon before extracting price
+        if "verizon.com" in url:
+            scrape_params["actions"] = [
+                {"type": "click", "selector": "xpath=//label[contains(., '512 GB')]"},
+                {"type": "wait", "milliseconds": 2000}
+            ]
+            
+        # Give BestBuy plenty of time due to anti-bot timeouts
+        if "bestbuy.com" in url:
+            scrape_params["timeout"] = 120000
+
+        doc = client.scrape(
+            url,
+            **scrape_params
+        )
+        if hasattr(doc, "json") and doc.json is not None:
+            if isinstance(doc.json, dict) and "current_price" in doc.json:
+                return doc.json
+        print("      ⚠️  Firecrawl: 'json' field empty or malformed.")
+        return None
+    except Exception as exc:
+        print(f"      ⚠️  Firecrawl exception: {exc}")
+        return None
 
 
 def try_extract_product(
@@ -434,6 +375,9 @@ def try_extract_product(
     Attempt price extraction for a single product up to MAX_RETRIES times.
     Returns the extracted dict, or None if all attempts fail.
     """
+    if client is None:
+        return None
+
     name  = product["name"]
     url   = product["url"]
     ptype = product.get("type", "bh_price")
@@ -491,12 +435,141 @@ def load_active_products() -> list[dict]:
     return active
 
 
+def extract_verizon_local(url: str) -> dict | None:
+    """Extract Verizon iPhone 17 Pro Max 512GB price using direct requests + regex."""
+    import requests
+    import re
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    }
+    try:
+        print("      🔍 Local fallback: Fetching Verizon page directly...")
+        r = requests.get(url, headers=headers, timeout=15)
+        if r.status_code != 200:
+            print(f"      ⚠️  Local fallback: Verizon returned status code {r.status_code}")
+            return None
+        html = r.text
+        # We search for sku6037331 (the 512GB Deep Blue SKU)
+        target_sku = "sku6037331"
+        for match in re.finditer(target_sku, html):
+            start = max(0, match.start() - 2000)
+            end = min(len(html), match.end() + 2000)
+            snippet = html[start:end]
+            clean_snippet = snippet.replace('\\"', '"').replace('\\\\', '\\')
+            
+            purch_prices = re.findall(r'"buyProductMaxPurch"\s*:\s*([\d.]+)', clean_snippet)
+            if purch_prices:
+                price = float(purch_prices[0])
+                if price > 100.0:
+                    print(f"      🎯 Local fallback: Successfully extracted ${price:.2f} for Verizon")
+                    return {
+                        "product_title": "Apple iPhone 17 Pro Max 512GB Deep Blue (Verizon)",
+                        "current_price": price,
+                        "stock_status": "In Stock" if '"isInStock":true' in clean_snippet else "Unknown"
+                    }
+        print(f"      ⚠️  Local fallback: SKU {target_sku} or price not found in Verizon HTML.")
+    except Exception as e:
+        print(f"      ⚠️  Local fallback: Verizon direct fetch failed: {e}")
+    return None
+
+
+def extract_bestbuy_local(url: str) -> dict | None:
+    """Extract BestBuy iPhone 17 Pro Max price using direct requests + regex."""
+    import requests
+    import re
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+        'Connection': 'keep-alive'
+    }
+    try:
+        print("      🔍 Local fallback: Fetching BestBuy page directly...")
+        r = requests.get(url, headers=headers, timeout=15)
+        if r.status_code != 200:
+            print(f"      ⚠️  Local fallback: BestBuy returned status code {r.status_code}")
+            return None
+        html = r.text
+        price_match = re.search(r'"currentPrice"\s*:\s*([\d.]+)', html)
+        if not price_match:
+            price_match = re.search(r'"price"\s*:\s*([\d.]+)', html)
+        if not price_match:
+            price_match = re.search(r'"regularPrice"\s*:\s*([\d.]+)', html)
+            
+        if price_match:
+            price = float(price_match.group(1))
+            if price > 100.0:
+                print(f"      🎯 Local fallback: Successfully extracted ${price:.2f} for BestBuy")
+                return {
+                    "product_title": "Apple iPhone 17 Pro Max 512GB Deep Blue (BestBuy)",
+                    "current_price": price,
+                    "stock_status": "In Stock" if "addButtonState\":\"ADD_TO_CART" in html else "Unknown"
+                }
+        print("      ⚠️  Local fallback: Price not found in BestBuy HTML.")
+    except Exception as e:
+        print(f"      ⚠️  Local fallback: BestBuy direct fetch failed: {e}")
+    return None
+
+
+def extract_via_scraperapi(url: str) -> dict | None:
+    """Fallback extraction using ScraperAPI proxy service."""
+    if not SCRAPERAPI_KEY:
+        return None
+    import requests
+    print("      🔍 ScraperAPI fallback: Fetching page...")
+    try:
+        payload = {'api_key': SCRAPERAPI_KEY, 'url': url}
+        r = requests.get('https://api.scraperapi.com/', params=payload, timeout=60)
+        if r.status_code == 200:
+            html = r.text
+            if "verizon.com" in url:
+                import re
+                target_sku = "sku6037331"
+                for match in re.finditer(target_sku, html):
+                    start = max(0, match.start() - 2000)
+                    end = min(len(html), match.end() + 2000)
+                    snippet = html[start:end]
+                    clean_snippet = snippet.replace('\\"', '"').replace('\\\\', '\\')
+                    purch_prices = re.findall(r'"buyProductMaxPurch"\s*:\s*([\d.]+)', clean_snippet)
+                    if purch_prices:
+                        price = float(purch_prices[0])
+                        if price > 100.0:
+                            print(f"      🎯 ScraperAPI fallback: Successfully extracted ${price:.2f} for Verizon")
+                            return {
+                                "product_title": "Apple iPhone 17 Pro Max 512GB Deep Blue (Verizon)",
+                                "current_price": price,
+                                "stock_status": "In Stock" if '"isInStock":true' in clean_snippet else "Unknown"
+                            }
+            elif "bestbuy.com" in url:
+                import re
+                price_match = re.search(r'"currentPrice"\s*:\s*([\d.]+)', html)
+                if not price_match:
+                    price_match = re.search(r'"price"\s*:\s*([\d.]+)', html)
+                if not price_match:
+                    price_match = re.search(r'"regularPrice"\s*:\s*([\d.]+)', html)
+                if price_match:
+                    price = float(price_match.group(1))
+                    if price > 100.0:
+                        print(f"      🎯 ScraperAPI fallback: Successfully extracted ${price:.2f} for BestBuy")
+                        return {
+                            "product_title": "Apple iPhone 17 Pro Max 512GB Deep Blue (BestBuy)",
+                            "current_price": price,
+                            "stock_status": "In Stock" if "addButtonState\":\"ADD_TO_CART" in html else "Unknown"
+                        }
+        else:
+            print(f"      ⚠️  ScraperAPI fallback: Returned status code {r.status_code}")
+    except Exception as e:
+        print(f"      ⚠️  ScraperAPI fallback exception: {e}")
+    return None
+
+
 def extract_product_data(provider: str, client, product: dict) -> dict | None:
     """
     Extracts price and stock data for one product.
     Returns extracted data dict or None on failure.
     """
     name: str = product["name"]
+    url:  str = product["url"]
 
     # ── Simulation mode ────────────────────────────────────────────────────────
     if PRICE_OVERRIDE is not None:
@@ -506,33 +579,28 @@ def extract_product_data(provider: str, client, product: dict) -> dict | None:
             "stock_status": "Simulated"
         }
 
-    # Try primary provider
+    # Try primary provider (Firecrawl)
     res = try_extract_product(provider, client, product)
     if res is not None:
         return res
 
-    # Only allow fallback from SGAI to Firecrawl. If primary is Firecrawl, do not fallback to SGAI.
-    if provider == "firecrawl":
-        return None
+    # Fallback to ScraperAPI (if key configured)
+    if SCRAPERAPI_KEY:
+        print(f"\n🔄 Primary [{provider.upper()}] failed for {name}. Falling back to [SCRAPERAPI]...")
+        res = extract_via_scraperapi(url)
+        if res is not None:
+            return res
 
-    secondary_provider = "firecrawl"
-    secondary_key = FIRECRAWL_API_KEY
-
-    if secondary_key:
-        print(f"\n🔄 Primary [{provider.upper()}] failed for {name}. Falling back to [{secondary_provider.upper()}]...")
-        try:
-            if secondary_provider == "firecrawl":
-                from firecrawl import FirecrawlApp
-                sec_client = FirecrawlApp(api_key=FIRECRAWL_API_KEY)
-            else:
-                from scrapegraph_py import ScrapeGraphAI
-                sec_client = ScrapeGraphAI(api_key=SGAI_API_KEY)
-
-            res = try_extract_product(secondary_provider, sec_client, product, "fallback")
-            if res is not None:
-                return res
-        except Exception as exc:
-            print(f"  ⚠️  Failed to initialize or extract via fallback provider {secondary_provider.upper()}: {exc}")
+    # Local python direct requests + regex parser (completely free backup)
+    print(f"\n🔄 Fallbacks failed for {name}. Attempting zero-credit local parsing fallback...")
+    if "verizon.com" in url:
+        res = extract_verizon_local(url)
+        if res is not None:
+            return res
+    elif "bestbuy.com" in url:
+        res = extract_bestbuy_local(url)
+        if res is not None:
+            return res
 
     return None
 
@@ -620,10 +688,9 @@ def main() -> None:
     if not NTFY_TOPIC:
         print("❌ Missing NTFY_TOPIC. Set it in .env or GitHub Secrets.")
         sys.exit(1)
-    if not SGAI_API_KEY and not FIRECRAWL_API_KEY:
-        print("❌ No extraction provider configured.")
-        print("   Set SGAI_API_KEY and/or FIRECRAWL_API_KEY in .env or GitHub Secrets.")
-        sys.exit(1)
+    if not FIRECRAWL_API_KEY and not SCRAPERAPI_KEY:
+        print("⚠️  No API keys configured (FIRECRAWL_API_KEY / SCRAPERAPI_KEY).")
+        print("   Running in local-only fallback mode (zero-cost direct parsing).")
 
     if REPORT_MODE:
         print("📊 Running in REPORT MODE — real extraction, always notify with actual price.\n")
@@ -637,8 +704,7 @@ def main() -> None:
 
     print(f"🔍 Checking {len(products)} active product(s).\n")
 
-    min_credits = SGAI_CREDITS_PER_CALL * len(products)
-    provider, client = select_provider(min_credits)
+    provider, client = select_provider()
     print()
 
     # ── First extraction flow ──────────────────────────────────────────────────

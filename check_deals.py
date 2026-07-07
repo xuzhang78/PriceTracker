@@ -168,82 +168,18 @@ def notify_extraction_error(brands: list[str], provider: str) -> None:
 
 # ── Provider Selection ─────────────────────────────────────────────────────────
 
-def _check_sgai_credits() -> int:
+def select_provider() -> tuple[str, object]:
     """
-    Returns remaining SGAI credits as an integer.
-    Returns -1 if the check itself fails (network error, invalid key, etc.).
-    Returns  0 if credits are confirmed exhausted.
-    """
-    if not SGAI_API_KEY:
-        return -1
-    try:
-        from scrapegraph_py import ScrapeGraphAI
-        sgai = ScrapeGraphAI(api_key=SGAI_API_KEY)
-        info = sgai.credits()
-        # Handle nested data attribute first (new SDK format)
-        if hasattr(info, "data") and info.data is not None:
-            d = info.data
-            for field in ("remaining", "remaining_credits", "credits", "balance"):
-                if hasattr(d, field):
-                    return int(getattr(d, field))
-                if isinstance(d, dict) and field in d:
-                    return int(d[field])
-        # Handle multiple possible response formats across SDK versions
-        if isinstance(info, (int, float)):
-            return int(info)
-        if isinstance(info, dict):
-            for field in ("remaining", "remaining_credits", "credits", "balance"):
-                if field in info:
-                    return int(info[field])
-        for attr in ("remaining", "remaining_credits", "credits", "balance"):
-            if hasattr(info, attr):
-                return int(getattr(info, attr))
-        print(f"  ⚠️  Unrecognised SGAI credits response: {info}")
-        return -1
-    except Exception as exc:
-        print(f"  ⚠️  SGAI credit check failed: {exc}")
-        return -1
-
-
-def select_provider(min_credits_needed: int) -> tuple[str, object]:
-    """
-    Determines which extraction provider to use for this run.
-
-    Priority:
-      1. ScrapeGraphAI — if credit balance >= min_credits_needed
-      2. Firecrawl     — automatic fallback when SGAI credits are insufficient
-
-    Returns (provider_name: str, client: object).
-    Exits with code 1 if neither provider is available.
+    Selects Firecrawl as the primary extraction provider.
     """
     print("🔌 Selecting extraction provider...")
 
-    # ── Check SGAI ──────────────────────────────────────────────────────────────
-    remaining = _check_sgai_credits()
-
-    if remaining == -1:
-        # Credit check itself failed — attempt SGAI anyway (optimistic)
-        if SGAI_API_KEY:
-            print("  ⚠️  SGAI credit check inconclusive — attempting SGAI anyway.")
-            from scrapegraph_py import ScrapeGraphAI
-            return "sgai", ScrapeGraphAI(api_key=SGAI_API_KEY)
-    elif remaining >= min_credits_needed:
-        print(f"  ✅ SGAI: {remaining} credits available (need {min_credits_needed}) → using SGAI")
-        from scrapegraph_py import ScrapeGraphAI
-        return "sgai", ScrapeGraphAI(api_key=SGAI_API_KEY)
-    else:
-        print(f"  ⚠️  SGAI: only {remaining} credits remaining (need {min_credits_needed})")
-
-    # ── Fall back to Firecrawl ──────────────────────────────────────────────────
     if FIRECRAWL_API_KEY:
-        print("  ✅ Falling back to Firecrawl.")
+        print("  ✅ Firecrawl configured as primary provider.")
         from firecrawl import FirecrawlApp
         return "firecrawl", FirecrawlApp(api_key=FIRECRAWL_API_KEY)
 
-    # ── Neither available ───────────────────────────────────────────────────────
-    print("❌ No extraction provider available.")
-    print("   • SGAI: credits exhausted or key missing → set SGAI_API_KEY")
-    print("   • Firecrawl: not configured → set FIRECRAWL_API_KEY")
+    print("❌ Firecrawl is not configured → set FIRECRAWL_API_KEY")
     sys.exit(1)
 
 
@@ -637,9 +573,8 @@ def main() -> None:
     if not NTFY_TOPIC:
         print("❌ Missing NTFY_TOPIC. Set it in .env or GitHub Secrets.")
         sys.exit(1)
-    if not SGAI_API_KEY and not FIRECRAWL_API_KEY:
-        print("❌ No extraction provider configured.")
-        print("   Set SGAI_API_KEY and/or FIRECRAWL_API_KEY in .env or GitHub Secrets.")
+    if not FIRECRAWL_API_KEY:
+        print("❌ Firecrawl is not configured. Set FIRECRAWL_API_KEY in .env or GitHub Secrets.")
         sys.exit(1)
 
     if INCLUDE_EXPIRED:
@@ -658,9 +593,7 @@ def main() -> None:
     brand_names = [b["brand"] for b in active_brands]
     print(f"🔍 Checking {len(active_brands)} brand(s): {', '.join(brand_names)}\n")
 
-    # Select provider based on credit availability
-    min_credits = SGAI_CREDITS_PER_CALL * len(active_brands)
-    provider, client = select_provider(min_credits)
+    provider, client = select_provider()
     print()
 
     state = load_state()
