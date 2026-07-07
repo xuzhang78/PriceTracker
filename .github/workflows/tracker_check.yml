@@ -60,7 +60,7 @@ jobs:
             exit 0
           fi
 
-          count=$(jq '[.trackers[] | select(.type == "dealmoon_bogo" and .active == true)] | length' tracker_config.json)
+          count=$(jq --arg today "$(date +%F)" '[.trackers[] | select(.type == "dealmoon_bogo" and .active == true and (.start_date == null or .start_date == "" or .start_date <= $today))] | length' tracker_config.json)
           if [ "$count" -gt 0 ]; then
             echo "skip=false" >> $GITHUB_OUTPUT
             echo "✅ $count active Dealmoon brand(s) found — proceeding"
@@ -116,7 +116,7 @@ jobs:
             exit 0
           fi
 
-          count=$(jq '[.trackers[] | select((.type == "bh_price" or .type == "iphone_price") and .active == true)] | length' tracker_config.json)
+          count=$(jq --arg today "$(date +%F)" '[.trackers[] | select((.type == "bh_price" or .type == "iphone_price") and .active == true and (.start_date == null or .start_date == "" or .start_date <= $today))] | length' tracker_config.json)
           if [ "$count" -gt 0 ]; then
             echo "skip=false" >> $GITHUB_OUTPUT
             echo "✅ $count active price tracker product(s) found — proceeding"
