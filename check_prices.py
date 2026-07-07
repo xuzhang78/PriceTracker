@@ -175,7 +175,11 @@ _IPHONE_PRICE_PROMPT = (
     "Extract the product title, the current full retail price (single "
     "payment, not monthly installment) in USD as a plain float (no currency "
     "symbols, no commas), and the stock availability status. "
-    "Important: return the one-time purchase price, NOT a monthly payment."
+    "Important: return the one-time purchase price, NOT a monthly payment. "
+    "If the page shows multiple storage sizes or variants (e.g. 256GB, 512GB, 1TB), "
+    "specifically extract the price for the 512GB variant. "
+    "For Verizon: look for the 512GB storage model (SKU 'sku6037331') in the page content or embedded catalog JSON script tags "
+    "and extract its full purchase price (usually $1399.99)."
 )
 
 MAX_RETRIES   = 1 if IS_TEST else 3
@@ -346,7 +350,7 @@ def _extract_iphone_price_once(provider: str, client, url: str) -> dict | None:
         # Click the 512GB option on Verizon before extracting price
         if "verizon.com" in url:
             scrape_params["actions"] = [
-                {"type": "click", "selector": "xpath=//label[contains(., '512 GB')]"},
+                {"type": "click", "selector": "text=512 GB"},
                 {"type": "wait", "milliseconds": 2000}
             ]
             
