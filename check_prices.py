@@ -444,6 +444,30 @@ def load_active_products() -> list[dict]:
     return active
 
 
+def clean_html(html: str) -> str:
+    """Remove bloat from HTML (CSS styles, SVG vectors, images, comments, unneeded scripts) to save LLM tokens."""
+    import re
+    if not html:
+        return ""
+    # 1. Remove style tags
+    html = re.sub(r'<style[^>]*>.*?</style>', '', html, flags=re.DOTALL | re.IGNORECASE)
+    # 2. Remove SVG elements
+    html = re.sub(r'<svg[^>]*>.*?</svg>', '', html, flags=re.DOTALL | re.IGNORECASE)
+    # 3. Remove comments
+    html = re.sub(r'<!---->|<!--.*?-->', '', html, flags=re.DOTALL)
+    # 4. Remove unneeded script tags, but keep ones containing important catalog data
+    def script_replacer(match):
+        script_content = match.group(0)
+        markers = ["sku6037331", "currentPrice", "buyProductMaxPurch", "regularPrice", "productTitle", "addButtonState"]
+        if any(m in script_content for m in markers):
+            return script_content  # Keep
+        return ""  # Discard
+    html = re.sub(r'<script[^>]*>.*?</script>', script_replacer, html, flags=re.DOTALL | re.IGNORECASE)
+    # 5. Compress multiple newlines and spaces
+    html = re.sub(r'\n\s*\n', '\n', html)
+    return html.strip()
+
+
 def _extract_via_proxy_and_gemini(provider: str, proxy_key: str, url: str, schema: dict, prompt: str) -> dict | None:
     """Fetch HTML using ScraperAPI or Scrape.do proxy, and extract structured JSON using Gemini LLM."""
     if not GEMINI_API_KEY:
@@ -491,12 +515,15 @@ def _extract_via_proxy_and_gemini(provider: str, proxy_key: str, url: str, schem
         print("      🧠 Gemini: Extracting structured data from retrieved HTML...")
         from google.genai import types
         
+        # Clean HTML to minimize tokens and prevent truncation
+        cleaned_html = clean_html(html_content)
+        
         # Initialize unified Client
         client = genai.Client(api_key=GEMINI_API_KEY)
         
         full_prompt = (
             f"HTML Content:\n"
-            f"```html\n{html_content[:250000]}\n```\n\n"
+            f"```html\n{cleaned_html[:250000]}\n```\n\n"
             f"Extraction request: {prompt}\n\n"
             f"Instructions:\n"
             f"Extract the requested data and return ONLY a valid JSON object matching the JSON-LD schema layout below:\n"
