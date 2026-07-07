@@ -32,15 +32,12 @@ Checks the price of tracked products daily using AI extraction and sends a push 
 
 **Stack:**
 - **Scheduler:** GitHub Actions cron (`0 9 * * *` → 09:00 UTC daily)
-- **AI Extraction:** ScrapeGraphAI (primary) or Firecrawl (fallback when credits are depleted)
+- **AI Extraction:** Firecrawl (primary) or ScraperAPI/Scrape.do proxies + Google Gemini API (fallbacks)
 - **Notifications:** ntfy.sh push (primary), Telegram (commented-out alternative)
 - **Config:** `tracker_config.json` — unified tracker config file
 
-**Why GitHub Actions instead of SGAI Monitors:**
-SGAI's Monitor feature sends data via webhook, which requires a public-URL server to receive it. GitHub Actions acts as the scheduler instead, calling the extraction API fresh on each run. This eliminates the need for any hosted server.
-
-**Why direct extraction instead of monitor.create():**
-Direct extraction is simpler and allows dynamically choosing between ScrapeGraphAI and Firecrawl at run time depending on credit availability, while monitors are locked into ScrapeGraphAI.
+**Why GitHub Actions:**
+GitHub Actions acts as the scheduler, calling the extraction API fresh on each run. This eliminates the need for any hosted server.
 
 ---
 
@@ -77,11 +74,10 @@ GitHub Actions (cron: 0 9 * * *)
     └── runs check_prices.py
             ├── loads tracker_config.json → filters active bh_price entries
             └── for each active product:
-                    ├── Select Provider (SGAI or Firecrawl based on credit balance)
-                    ├── Extract Price (js rendering + stealth proxy, up to 3 retries):
-                    │       ├── SGAI: sgai.extract()
-                    │       └── Firecrawl: client.scrape()
-                    ├── Fallback: SGAI fail → fall back to Firecrawl (one-way only)
+                    ├── Select Provider (Firecrawl as primary)
+                    ├── Extract Price (js rendering + stealth proxy, up to 3 retries)
+                    ├── Fallback 1: ScraperAPI + Gemini LLM parser
+                    ├── Fallback 2: Scrape.do + Gemini LLM parser
                     ├── reads current_price, stock_status, product_title
                     ├── sanity guard: 100 < price < 10,000
                     ├── if price < threshold → POST drop alert to ntfy.sh

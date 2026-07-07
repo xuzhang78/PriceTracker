@@ -33,6 +33,7 @@ if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8")
 
 import requests
+from google import genai
 from dotenv import load_dotenv
 from pydantic import BaseModel
 
@@ -43,6 +44,8 @@ load_dotenv()
 SGAI_API_KEY        = os.getenv("SGAI_API_KEY", "")
 FIRECRAWL_API_KEY   = os.getenv("FIRECRAWL_API_KEY", "")
 SCRAPERAPI_KEY      = os.getenv("SCRAPERAPI_KEY", "")
+SCRAPE_DO_KEY       = os.getenv("SCRAPE_DO_KEY", "")
+GEMINI_API_KEY      = os.getenv("GEMINI_API_KEY", "")
 NTFY_TOPIC          = os.getenv("NTFY_TOPIC", "")
 _price_override_raw = os.getenv("PRICE_OVERRIDE", "").strip()
 PRICE_OVERRIDE: float | None = float(_price_override_raw) if _price_override_raw else None
@@ -157,8 +160,8 @@ def select_provider() -> tuple[str, object]:
         from firecrawl import FirecrawlApp
         return "firecrawl", FirecrawlApp(api_key=FIRECRAWL_API_KEY)
 
-    print("  ℹ️ Firecrawl is not configured. Relying on local fallbacks / ScraperAPI.")
-    return "local", None
+    print("  ℹ️ Firecrawl is not configured. Relying on backup proxies (ScraperAPI / Scrape.do) + Gemini.")
+    return "none", None
 
 
 # ── Extraction ─────────────────────────────────────────────────────────────────
@@ -435,132 +438,83 @@ def load_active_products() -> list[dict]:
     return active
 
 
-def extract_verizon_local(url: str) -> dict | None:
-    """Extract Verizon iPhone 17 Pro Max 512GB price using direct requests + regex."""
-    import requests
-    import re
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    }
-    try:
-        print("      🔍 Local fallback: Fetching Verizon page directly...")
-        r = requests.get(url, headers=headers, timeout=15)
-        if r.status_code != 200:
-            print(f"      ⚠️  Local fallback: Verizon returned status code {r.status_code}")
-            return None
-        html = r.text
-        # We search for sku6037331 (the 512GB Deep Blue SKU)
-        target_sku = "sku6037331"
-        for match in re.finditer(target_sku, html):
-            start = max(0, match.start() - 2000)
-            end = min(len(html), match.end() + 2000)
-            snippet = html[start:end]
-            clean_snippet = snippet.replace('\\"', '"').replace('\\\\', '\\')
-            
-            purch_prices = re.findall(r'"buyProductMaxPurch"\s*:\s*([\d.]+)', clean_snippet)
-            if purch_prices:
-                price = float(purch_prices[0])
-                if price > 100.0:
-                    print(f"      🎯 Local fallback: Successfully extracted ${price:.2f} for Verizon")
-                    return {
-                        "product_title": "Apple iPhone 17 Pro Max 512GB Deep Blue (Verizon)",
-                        "current_price": price,
-                        "stock_status": "In Stock" if '"isInStock":true' in clean_snippet else "Unknown"
-                    }
-        print(f"      ⚠️  Local fallback: SKU {target_sku} or price not found in Verizon HTML.")
-    except Exception as e:
-        print(f"      ⚠️  Local fallback: Verizon direct fetch failed: {e}")
-    return None
-
-
-def extract_bestbuy_local(url: str) -> dict | None:
-    """Extract BestBuy iPhone 17 Pro Max price using direct requests + regex."""
-    import requests
-    import re
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-        'Connection': 'keep-alive'
-    }
-    try:
-        print("      🔍 Local fallback: Fetching BestBuy page directly...")
-        r = requests.get(url, headers=headers, timeout=15)
-        if r.status_code != 200:
-            print(f"      ⚠️  Local fallback: BestBuy returned status code {r.status_code}")
-            return None
-        html = r.text
-        price_match = re.search(r'"currentPrice"\s*:\s*([\d.]+)', html)
-        if not price_match:
-            price_match = re.search(r'"price"\s*:\s*([\d.]+)', html)
-        if not price_match:
-            price_match = re.search(r'"regularPrice"\s*:\s*([\d.]+)', html)
-            
-        if price_match:
-            price = float(price_match.group(1))
-            if price > 100.0:
-                print(f"      🎯 Local fallback: Successfully extracted ${price:.2f} for BestBuy")
-                return {
-                    "product_title": "Apple iPhone 17 Pro Max 512GB Deep Blue (BestBuy)",
-                    "current_price": price,
-                    "stock_status": "In Stock" if "addButtonState\":\"ADD_TO_CART" in html else "Unknown"
-                }
-        print("      ⚠️  Local fallback: Price not found in BestBuy HTML.")
-    except Exception as e:
-        print(f"      ⚠️  Local fallback: BestBuy direct fetch failed: {e}")
-    return None
-
-
-def extract_via_scraperapi(url: str) -> dict | None:
-    """Fallback extraction using ScraperAPI proxy service."""
-    if not SCRAPERAPI_KEY:
+def _extract_via_proxy_and_gemini(provider: str, proxy_key: str, url: str, schema: dict, prompt: str) -> dict | None:
+    """Fetch HTML using ScraperAPI or Scrape.do proxy, and extract structured JSON using Gemini LLM."""
+    if not GEMINI_API_KEY:
+        print("      ⚠️  Gemini: GEMINI_API_KEY not configured. Cannot perform LLM extraction.")
         return None
+
     import requests
-    print("      🔍 ScraperAPI fallback: Fetching page...")
+    import json
+    
+    html_content = ""
     try:
-        payload = {'api_key': SCRAPERAPI_KEY, 'url': url}
-        r = requests.get('https://api.scraperapi.com/', params=payload, timeout=60)
-        if r.status_code == 200:
-            html = r.text
-            if "verizon.com" in url:
-                import re
-                target_sku = "sku6037331"
-                for match in re.finditer(target_sku, html):
-                    start = max(0, match.start() - 2000)
-                    end = min(len(html), match.end() + 2000)
-                    snippet = html[start:end]
-                    clean_snippet = snippet.replace('\\"', '"').replace('\\\\', '\\')
-                    purch_prices = re.findall(r'"buyProductMaxPurch"\s*:\s*([\d.]+)', clean_snippet)
-                    if purch_prices:
-                        price = float(purch_prices[0])
-                        if price > 100.0:
-                            print(f"      🎯 ScraperAPI fallback: Successfully extracted ${price:.2f} for Verizon")
-                            return {
-                                "product_title": "Apple iPhone 17 Pro Max 512GB Deep Blue (Verizon)",
-                                "current_price": price,
-                                "stock_status": "In Stock" if '"isInStock":true' in clean_snippet else "Unknown"
-                            }
-            elif "bestbuy.com" in url:
-                import re
-                price_match = re.search(r'"currentPrice"\s*:\s*([\d.]+)', html)
-                if not price_match:
-                    price_match = re.search(r'"price"\s*:\s*([\d.]+)', html)
-                if not price_match:
-                    price_match = re.search(r'"regularPrice"\s*:\s*([\d.]+)', html)
-                if price_match:
-                    price = float(price_match.group(1))
-                    if price > 100.0:
-                        print(f"      🎯 ScraperAPI fallback: Successfully extracted ${price:.2f} for BestBuy")
-                        return {
-                            "product_title": "Apple iPhone 17 Pro Max 512GB Deep Blue (BestBuy)",
-                            "current_price": price,
-                            "stock_status": "In Stock" if "addButtonState\":\"ADD_TO_CART" in html else "Unknown"
-                        }
+        if provider == "scraperapi":
+            print(f"      🔍 ScraperAPI proxy: Fetching HTML for {url}...")
+            params = {'api_key': proxy_key, 'url': url}
+            if "bestbuy" in url or "verizon" in url or "bhphotovideo" in url:
+                params['render'] = 'true'
+            r = requests.get('https://api.scraperapi.com/', params=params, timeout=90)
+            if r.status_code == 200:
+                html_content = r.text
+            else:
+                print(f"      ⚠️  ScraperAPI: Returned status code {r.status_code}")
+                return None
+        elif provider == "scrapedo":
+            print(f"      🔍 Scrape.do proxy: Fetching HTML for {url}...")
+            params = {'token': proxy_key, 'url': url}
+            if "bestbuy" in url or "verizon" in url or "bhphotovideo" in url:
+                params['render'] = 'true'
+            r = requests.get('https://api.scrape.do', params=params, timeout=90)
+            if r.status_code == 200:
+                html_content = r.text
+            else:
+                print(f"      ⚠️  Scrape.do: Returned status code {r.status_code}")
+                return None
         else:
-            print(f"      ⚠️  ScraperAPI fallback: Returned status code {r.status_code}")
+            return None
     except Exception as e:
-        print(f"      ⚠️  ScraperAPI fallback exception: {e}")
-    return None
+        print(f"      ⚠️  Proxy fetch exception via {provider.upper()}: {e}")
+        return None
+
+    if not html_content:
+        print(f"      ⚠️  Proxy fetch via {provider.upper()} returned empty content.")
+        return None
+
+    try:
+        print("      🧠 Gemini: Extracting structured data from retrieved HTML...")
+        from google.genai import types
+        
+        # Initialize unified Client
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        
+        full_prompt = (
+            f"HTML Content:\n"
+            f"```html\n{html_content[:250000]}\n```\n\n"
+            f"Extraction request: {prompt}\n\n"
+            f"Instructions:\n"
+            f"Extract the requested data and return ONLY a valid JSON object matching the JSON-LD schema layout below:\n"
+            f"{json.dumps(schema)}"
+        )
+        
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=full_prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json"
+            )
+        )
+        
+        if response.text:
+            parsed = json.loads(response.text.strip())
+            print("      🎯 Gemini: Extraction successful.")
+            return parsed
+        else:
+            print("      ⚠️  Gemini: Empty response text.")
+            return None
+    except Exception as e:
+        print(f"      ⚠️  Gemini extraction exception: {e}")
+        return None
 
 
 def extract_product_data(provider: str, client, product: dict) -> dict | None:
@@ -570,6 +524,7 @@ def extract_product_data(provider: str, client, product: dict) -> dict | None:
     """
     name: str = product["name"]
     url:  str = product["url"]
+    ptype = product.get("type", "bh_price")
 
     # ── Simulation mode ────────────────────────────────────────────────────────
     if PRICE_OVERRIDE is not None:
@@ -579,26 +534,31 @@ def extract_product_data(provider: str, client, product: dict) -> dict | None:
             "stock_status": "Simulated"
         }
 
-    # Try primary provider (Firecrawl)
-    res = try_extract_product(provider, client, product)
-    if res is not None:
-        return res
-
-    # Fallback to ScraperAPI (if key configured)
-    if SCRAPERAPI_KEY:
-        print(f"\n🔄 Primary [{provider.upper()}] failed for {name}. Falling back to [SCRAPERAPI]...")
-        res = extract_via_scraperapi(url)
+    # 1. Try Primary: Firecrawl (if provider is not none)
+    if provider != "none":
+        res = try_extract_product(provider, client, product)
         if res is not None:
             return res
 
-    # Local python direct requests + regex parser (completely free backup)
-    print(f"\n🔄 Fallbacks failed for {name}. Attempting zero-credit local parsing fallback...")
-    if "verizon.com" in url:
-        res = extract_verizon_local(url)
+    # Select prompt and schema based on product type
+    if ptype == "iphone_price":
+        schema = IPhoneProductSchema.model_json_schema()
+        prompt = _IPHONE_PRICE_PROMPT
+    else:
+        schema = MacBookProductSchema.model_json_schema()
+        prompt = _PRICE_PROMPT
+
+    # 2. Try Secondary: ScraperAPI + Gemini
+    if SCRAPERAPI_KEY and GEMINI_API_KEY:
+        print(f"\n🔄 Primary [{provider.upper()}] failed or bypassed for {name}. Falling back to [SCRAPERAPI + GEMINI]...")
+        res = _extract_via_proxy_and_gemini("scraperapi", SCRAPERAPI_KEY, url, schema, prompt)
         if res is not None:
             return res
-    elif "bestbuy.com" in url:
-        res = extract_bestbuy_local(url)
+
+    # 3. Try Tertiary: Scrape.do + Gemini
+    if SCRAPE_DO_KEY and GEMINI_API_KEY:
+        print(f"\n🔄 Previous attempts failed for {name}. Falling back to [SCRAPE_DO + GEMINI]...")
+        res = _extract_via_proxy_and_gemini("scrapedo", SCRAPE_DO_KEY, url, schema, prompt)
         if res is not None:
             return res
 

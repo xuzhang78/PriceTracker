@@ -82,6 +82,9 @@ jobs:
         if: steps.gate.outputs.skip != 'true'
         env:
           FIRECRAWL_API_KEY: ${{ secrets.FIRECRAWL_API_KEY }}
+          SCRAPERAPI_KEY:    ${{ secrets.SCRAPERAPI_KEY }}
+          SCRAPE_DO_KEY:     ${{ secrets.SCRAPE_DO_KEY }}
+          GEMINI_API_KEY:    ${{ secrets.GEMINI_API_KEY }}
           NTFY_TOPIC:        ${{ secrets.NTFY_TOPIC }}
           INCLUDE_EXPIRED:   ${{ inputs.include_expired || 'false' }}
           TESTING:           ${{ github.event_name == 'workflow_dispatch' && 'true' || 'false' }}
@@ -136,6 +139,8 @@ jobs:
         env:
           FIRECRAWL_API_KEY: ${{ secrets.FIRECRAWL_API_KEY }}
           SCRAPERAPI_KEY:    ${{ secrets.SCRAPERAPI_KEY }}
+          SCRAPE_DO_KEY:     ${{ secrets.SCRAPE_DO_KEY }}
+          GEMINI_API_KEY:    ${{ secrets.GEMINI_API_KEY }}
           NTFY_TOPIC:        ${{ secrets.NTFY_TOPIC }}
           PRICE_OVERRIDE:    ${{ inputs.price_override }}
           REPORT_MODE:       ${{ inputs.report_mode || 'false' }}

@@ -47,6 +47,7 @@ if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8")
 
 import requests
+from google import genai
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
@@ -56,12 +57,14 @@ load_dotenv()
 
 SGAI_API_KEY        = os.getenv("SGAI_API_KEY", "")
 FIRECRAWL_API_KEY   = os.getenv("FIRECRAWL_API_KEY", "")
+SCRAPERAPI_KEY      = os.getenv("SCRAPERAPI_KEY", "")
+SCRAPE_DO_KEY       = os.getenv("SCRAPE_DO_KEY", "")
+GEMINI_API_KEY      = os.getenv("GEMINI_API_KEY", "")
 NTFY_TOPIC          = os.getenv("NTFY_TOPIC", "")
 INCLUDE_EXPIRED     = os.getenv("INCLUDE_EXPIRED", "false").strip().lower() == "true"
 TESTING             = os.getenv("TESTING", "false").strip().lower() == "true"
 IS_TEST             = INCLUDE_EXPIRED or TESTING
 
-SGAI_CREDITS_PER_CALL = 10      # credits consumed per SGAI extract call
 MAX_RETRIES           = 1 if IS_TEST else 3
 RETRY_DELAYS          = [15, 30]
 FLOW_RETRY_WAIT       = 2 * 3600
@@ -179,8 +182,8 @@ def select_provider() -> tuple[str, object]:
         from firecrawl import FirecrawlApp
         return "firecrawl", FirecrawlApp(api_key=FIRECRAWL_API_KEY)
 
-    print("❌ Firecrawl is not configured → set FIRECRAWL_API_KEY")
-    sys.exit(1)
+    print("  ℹ️ Firecrawl is not configured. Relying on backup proxies (ScraperAPI / Scrape.do) + Gemini.")
+    return "none", None
 
 
 # ── Core Extraction ────────────────────────────────────────────────────────────
@@ -368,6 +371,99 @@ def try_extract_brand(
     return None
 
 
+def _extract_deals_via_proxy_and_gemini(provider: str, proxy_key: str, url: str, schema: dict, prompt: str) -> list[dict] | None:
+    """Fetch HTML using ScraperAPI or Scrape.do proxy, and extract structured JSON using Gemini LLM."""
+    if not GEMINI_API_KEY:
+        print("      ⚠️  Gemini: GEMINI_API_KEY not configured. Cannot perform LLM extraction.")
+        return None
+
+    import requests
+    import json
+    
+    html_content = ""
+    try:
+        if provider == "scraperapi":
+            print(f"      🔍 ScraperAPI proxy: Fetching HTML for {url}...")
+            params = {'api_key': proxy_key, 'url': url}
+            r = requests.get('https://api.scraperapi.com/', params=params, timeout=90)
+            if r.status_code == 200:
+                html_content = r.text
+            else:
+                print(f"      ⚠️  ScraperAPI: Returned status code {r.status_code}")
+                return None
+        elif provider == "scrapedo":
+            print(f"      🔍 Scrape.do proxy: Fetching HTML for {url}...")
+            params = {'token': proxy_key, 'url': url}
+            r = requests.get('https://api.scrape.do', params=params, timeout=90)
+            if r.status_code == 200:
+                html_content = r.text
+            else:
+                print(f"      ⚠️  Scrape.do: Returned status code {r.status_code}")
+                return None
+        else:
+            return None
+    except Exception as e:
+        print(f"      ⚠️  Proxy fetch exception via {provider.upper()}: {e}")
+        return None
+
+    if not html_content:
+        print(f"      ⚠️  Proxy fetch via {provider.upper()} returned empty content.")
+        return None
+
+    # Parse exact date times from HTML for mapping later (if available)
+    deal_times = parse_dates_from_html(html_content)
+
+    try:
+        print("      🧠 Gemini: Extracting structured data from retrieved HTML...")
+        from google.genai import types
+        
+        # Initialize unified Client
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        
+        full_prompt = (
+            f"HTML Content:\n"
+            f"```html\n{html_content[:250000]}\n```\n\n"
+            f"Extraction request: {prompt}\n\n"
+            f"Instructions:\n"
+            f"Extract the requested data and return ONLY a valid JSON object matching the JSON-LD schema layout below:\n"
+            f"{json.dumps(schema)}"
+        )
+        
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=full_prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json"
+            )
+        )
+        
+        if response.text:
+            parsed = json.loads(response.text.strip())
+            deals = parsed.get("deals", [])
+            
+            # Map exact dates via URL deal IDs
+            mapped_count = 0
+            for deal in deals:
+                url_str = deal.get("deal_url", "")
+                id_match = re.search(r'/(\d+)\.html', url_str)
+                if id_match:
+                    deal_id = id_match.group(1)
+                    if deal_id in deal_times:
+                        deal["deal_date"] = deal_times[deal_id]
+                        mapped_count += 1
+            if mapped_count > 0:
+                print(f"      🎯 Gemini: Mapped exact dates for {mapped_count}/{len(deals)} deals using HTML timestamps.")
+            
+            print(f"      🎯 Gemini: Extraction successful. {len(deals)} deal(s) parsed.")
+            return deals
+        else:
+            print("      ⚠️  Gemini: Empty response text.")
+            return None
+    except Exception as e:
+        print(f"      ⚠️  Gemini extraction exception: {e}")
+        return None
+
+
 def try_extract_brand_with_fallback(
     primary_provider: str,
     primary_client,
@@ -380,35 +476,35 @@ def try_extract_brand_with_fallback(
     to secondary provider (if configured) if the primary fails.
     """
     brand = brand_cfg["brand"]
-    res = try_extract_brand(primary_provider, primary_client, brand_cfg, include_expired, label)
-    if res is not None:
-        return res
+    url   = _build_url(brand_cfg["url"], include_expired)
+    
+    # 1. Try Primary: Firecrawl (if provider is not none)
+    if primary_provider != "none":
+        res = try_extract_brand(primary_provider, primary_client, brand_cfg, include_expired, label)
+        if res is not None:
+            return res
 
-    # Only allow fallback from SGAI to Firecrawl. If primary is Firecrawl, do not fallback to SGAI.
-    if primary_provider == "firecrawl":
-        return None
+    schema = DealmoonSchema.model_json_schema()
+    expired_instruction = (
+        "Important: you must extract ALL deals, including those marked as expired or past."
+        if include_expired else
+        "Important: focus on active deals only."
+    )
+    prompt = _EXTRACTION_PROMPT.format(expired_instruction=expired_instruction)
 
-    secondary_provider = "firecrawl"
-    secondary_key = FIRECRAWL_API_KEY
+    # 2. Try Secondary: ScraperAPI + Gemini
+    if SCRAPERAPI_KEY and GEMINI_API_KEY:
+        print(f"\n🔄 Primary [{primary_provider.upper()}] failed or bypassed for {brand}. Falling back to [SCRAPERAPI + GEMINI]...")
+        res = _extract_deals_via_proxy_and_gemini("scraperapi", SCRAPERAPI_KEY, url, schema, prompt)
+        if res is not None:
+            return res
 
-    if secondary_key:
-        print(f"\n🔄 Primary [{primary_provider.upper()}] failed for {brand}. Falling back to [{secondary_provider.upper()}]...")
-        try:
-            if secondary_provider == "firecrawl":
-                from firecrawl import FirecrawlApp
-                sec_client = FirecrawlApp(api_key=FIRECRAWL_API_KEY)
-            else:
-                from scrapegraph_py import ScrapeGraphAI
-                sec_client = ScrapeGraphAI(api_key=SGAI_API_KEY)
-
-            res = try_extract_brand(
-                secondary_provider, sec_client, brand_cfg, include_expired,
-                f"{label} fallback".strip()
-            )
-            if res is not None:
-                return res
-        except Exception as exc:
-            print(f"  ⚠️  Failed to initialize or extract via fallback provider {secondary_provider.upper()}: {exc}")
+    # 3. Try Tertiary: Scrape.do + Gemini
+    if SCRAPE_DO_KEY and GEMINI_API_KEY:
+        print(f"\n🔄 Previous attempts failed for {brand}. Falling back to [SCRAPE_DO + GEMINI]...")
+        res = _extract_deals_via_proxy_and_gemini("scrapedo", SCRAPE_DO_KEY, url, schema, prompt)
+        if res is not None:
+            return res
 
     return None
 
