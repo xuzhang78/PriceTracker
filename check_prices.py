@@ -480,10 +480,13 @@ def load_active_products() -> list[dict]:
             continue
         start_date_str = p.get("start_date")
         if start_date_str:
-            start = datetime.date.fromisoformat(start_date_str)
-            if today < start:
-                print(f"  ⏳ Skipping '{p['name']}' — starts on {start_date_str}")
-                continue
+            if IS_TEST:
+                print(f"  🧪 Testing mode: Bypassing start_date ({start_date_str}) for '{p['name']}'")
+            else:
+                start = datetime.date.fromisoformat(start_date_str)
+                if today < start:
+                    print(f"  ⏳ Skipping '{p['name']}' — starts on {start_date_str}")
+                    continue
         active.append(p)
     return active
 
