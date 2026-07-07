@@ -359,8 +359,10 @@ Products are configured in `products.json`. No code changes needed to add, pause
 
 ### Schema
 
+**B&H Price tracker (`bh_price`):**
 ```json
 {
+  "type": "bh_price",
   "name": "Display name (used in notifications)",
   "url": "Full B&H Photo product URL",
   "threshold": 2700.00,
@@ -374,12 +376,28 @@ Products are configured in `products.json`. No code changes needed to add, pause
 }
 ```
 
-### Active Products (as of 2026-05-31)
+**iPhone Price tracker (`iphone_price`):**
+```json
+{
+  "type": "iphone_price",
+  "name": "Display name (used in notifications)",
+  "url": "Full product page URL",
+  "threshold": 1399.00,
+  "start_date": "2026-09-01",
+  "active": true
+}
+```
 
-| Model | URL slug | Threshold | Status |
-|---|---|---|---|
-| Silver 14" MBP M5 | `1957138-REG` | $2,700 | ⏸️ Paused — out of stock, was $2699 |
-| Space Black 14" MBP M5 | `1957137-REG` | $2,700 | ⏸️ Paused temporarily |
+**`start_date` field** (optional, format `YYYY-MM-DD`): When present, the script skips the entry until the current date reaches or passes `start_date`. Useful for products not yet available for purchase.
+
+### Tracked Products (as of 2026-07-06)
+
+| Product | Type | Store | Threshold | Status |
+|---|---|---|---|---|
+| Silver 14" MBP M5 | `bh_price` | B&H Photo | $2,700 | ⏸️ Paused — purchased |
+| Space Black 14" MBP M5 | `bh_price` | B&H Photo | $2,700 | ⏸️ Paused — purchased |
+| iPhone 17 Pro Max 512GB Deep Blue | `iphone_price` | BestBuy | $1,399 | ⏳ Starts Sep 1, 2026 |
+| iPhone 17 Pro Max 512GB Deep Blue | `iphone_price` | Verizon | $1,399 | ⏳ Starts Sep 1, 2026 |
 
 ### Common Operations
 
@@ -550,7 +568,8 @@ Actions tab → B&H MacBook Price Check → Run workflow → enter `2499.00` in 
 | Site | Difficulty | Notes |
 |---|---|---|
 | B&H Photo | Medium | Cloudflare — requires `stealth=True` |
-| Best Buy | Medium | Similar to B&H |
+| Best Buy | Medium | Uses `iphone_price` type with LLM-only extraction. `stealth=True` + `wait=3000` |
+| Verizon | Medium | Uses `iphone_price` type with LLM-only extraction. Prompt engineered for full retail price |
 | Apple Store | Easy | Less aggressive bot detection |
 | Amazon | Hard | Very aggressive — may need proxy rotation in future |
 
@@ -581,3 +600,5 @@ from scrapegraph_py import AsyncScrapeGraphAI
 | Actions not running on schedule | GitHub cron can drift ±1hr | Expected. Not an error. |
 | `Node.js 20 deprecation warning` | Old action versions | Use `actions/checkout@v5`, `actions/setup-python@v6` |
 | Push rejected: `workflow` scope missing | PAT lacks workflow scope | Add `workflow` scope at github.com/settings/tokens |
+| iPhone price shows monthly amount | LLM extracted installment instead of full price | Check extraction prompt emphasizes "single payment, not monthly installment" |
+| `⏳ Skipping` for iPhone entries | `start_date` is in the future | Expected before Sep 1, 2026. Change `start_date` to test earlier |

@@ -37,9 +37,28 @@ Monitors B&H Photo for MacBook Pro M5 price drops below a configured threshold.
 GitHub Actions (daily 09:00 UTC)
     └── check_prices.py
             ├── select provider (SGAI or Firecrawl)
-            ├── extract MacBook price details
+            ├── extract MacBook price details (HTML regex + LLM fallback)
             └── price < threshold → ntfy.sh → 📱 your phone
 ```
+
+---
+
+### 3. 📱 iPhone Price Tracker (`check_prices.py`)
+
+Monitors **BestBuy** and **Verizon** for iPhone 17 Pro Max 512GB Deep Blue price drops below $1,399.
+Uses LLM-only extraction (no regex) with a prompt engineered to capture the **single full payment price** (not monthly installments).
+
+```
+GitHub Actions (daily 09:00 UTC)
+    └── check_prices.py
+            ├── select provider (SGAI or Firecrawl)
+            ├── extract iPhone price details (LLM structured extraction)
+            └── price < threshold → ntfy.sh → 📱 your phone
+```
+
+**Key features:**
+- **start_date gating**: Tracker entries support a `start_date` field — the script skips entries until that date. The iPhone trackers start on **2026-09-01**.
+- **Full-price extraction**: Prompt explicitly requests the one-time purchase price, avoiding monthly installment amounts.
 
 All configurations are managed in the unified config file `tracker_config.json`.
 
@@ -173,6 +192,20 @@ Products are configured in [`tracker_config.json`](./tracker_config.json).
 }
 ```
 
+### Add an iPhone product with delayed start
+```json
+{
+  "type": "iphone_price",
+  "name": "iPhone 17 Pro Max 512GB Deep Blue (BestBuy)",
+  "url": "https://www.bestbuy.com/product/...",
+  "threshold": 1399.00,
+  "start_date": "2026-09-01",
+  "active": true
+}
+```
+
+The `start_date` field (format: `YYYY-MM-DD`) delays tracking until that date. The entry is `active: true` but the script will skip it until the start date arrives.
+
 ---
 
 ## Credit Usage
@@ -181,19 +214,22 @@ Thanks to **Optimizations A & B**, our daily checks are highly cost-efficient:
 
 * **BOGO Tracker**: Uses structured JSON extraction (5 credits per request on Firecrawl fallback). Checking 2 brands daily consumes $2 \times 5 = 10$ credits/day.
 * **MacBook Price Tracker**: Uses HTML-only scraping and regex parsing (1 credit per request on Firecrawl/SGAI). Checking 2 products daily consumes $2 \times 1 = 2$ credits/day.
+* **iPhone Price Tracker**: Uses LLM structured extraction (10 credits per request). Checking 2 stores daily consumes $2 \times 10 = 20$ credits/day. **Dormant until 2026-09-01.**
 
-| Tracker | Schedule | Requests/month | Credits/month |
-|---|---|---|---|
-| BOGO Tracker (2 brands) | Daily | 60 | 300 |
-| MacBook Tracker (2 models) | Daily | 60 | 60 |
-| **Total** | | **120** | **360** |
+| Tracker | Schedule | Requests/month | Credits/month | Status |
+|---|---|---|---|---|
+| BOGO Tracker (2 brands) | Daily | 60 | 300 | Active |
+| MacBook Tracker (2 models) | Daily | 60 | 60 | Paused |
+| iPhone Tracker (2 stores) | Daily | 60 | 600 | Starts Sep 1 |
+| **Total (when all active)** | | **180** | **960** | |
 
-This total of **360 credits/month** fits comfortably within the **500 free credits/month** plan.
+> **Note:** With MacBook trackers paused and iPhone trackers dormant until Sep 1, current monthly usage is **~300 credits** (BOGO only). When the iPhone tracker activates, consider upgrading credits or reducing check frequency.
 
 ### Optimization Highlights
 1. **B&H HTML Scraping**: The MacBook tracker queries Firecrawl or SGAI in html-only mode (1 credit instead of 5-10 credits) and parses data using regex, falling back to LLM structured extraction only on failure.
 2. **Capped Testing Retries (Optimization A)**: In test modes, retries are capped at `1` instead of `3` to prevent credit burn during failure debugging.
 3. **Smart Pagination**: Dealmoon crawls subsequent pages (up to page 3) only during testing mode when looking for historical BOGO matches. Daily production runs check page 1 only.
+4. **Start-date gating**: iPhone tracker entries use `start_date` to avoid burning credits before the product is available for purchase.
 
 ---
 

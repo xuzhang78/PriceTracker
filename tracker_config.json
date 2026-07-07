@@ -40,6 +40,22 @@
       "url": "https://www.bhphotovideo.com/c/product/1957137-REG/apple_mbp_m5p_31_14_macbook_pro_m5.html",
       "threshold": 2700.00,
       "active": false
+    },
+    {
+      "type": "iphone_price",
+      "name": "iPhone 17 Pro Max 512GB Deep Blue (BestBuy)",
+      "url": "https://www.bestbuy.com/product/apple-iphone-17-pro-max-512gb-deep-blue-verizon/JCQ6HQTQVJ/sku/6472872",
+      "threshold": 1399.00,
+      "start_date": "2026-09-01",
+      "active": true
+    },
+    {
+      "type": "iphone_price",
+      "name": "iPhone 17 Pro Max 512GB Deep Blue (Verizon)",
+      "url": "https://www.verizon.com/smartphones/apple-iphone-17-pro-max/",
+      "threshold": 1399.00,
+      "start_date": "2026-09-01",
+      "active": true
     }
   ]
 }

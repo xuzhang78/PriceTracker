@@ -1,13 +1,16 @@
 """
-B&H Photo MacBook Pro M5 Price Tracker
----------------------------------------
-Reads tracker_config.json (type: bh_price), uses AI extraction to get the
-current price, and sends an ntfy.sh push notification when price drops below
-the configured threshold.
+Product Price Tracker
+---------------------
+Reads tracker_config.json and tracks prices for:
+  - bh_price:     B&H Photo products (HTML regex + LLM fallback)
+  - iphone_price: iPhone products on BestBuy / Verizon (LLM-only extraction)
+
+Sends an ntfy.sh push notification when price drops below the configured
+threshold. Supports a start_date field to delay tracking until a future date.
 
 Extraction provider selection (automatic):
-  1. Check SGAI credit balance. If credits >= cost of one full run (10 per
-     product), use ScrapeGraphAI.
+  1. Check SGAI credit balance. If credits >= cost of one full run, use
+     ScrapeGraphAI.
   2. If SGAI credits are exhausted or below threshold, fall back to Firecrawl.
 
 Run modes:
@@ -18,6 +21,7 @@ Run modes:
                     → skips real extraction, tests notification pipeline
 """
 
+import datetime
 import json
 import os
 import sys
@@ -56,12 +60,19 @@ BASE_DIR     = os.path.dirname(__file__)
 CONFIG_PATH  = os.path.join(BASE_DIR, "tracker_config.json")
 
 
-# ── Data Schema ────────────────────────────────────────────────────────────────
+# ── Data Schemas ───────────────────────────────────────────────────────────────
 
 class MacBookProductSchema(BaseModel):
     """Structured fields extracted by AI from each product page."""
     product_title: str
     current_price: float   # USD, numeric only — no $ or commas
+    stock_status:  str
+
+
+class IPhoneProductSchema(BaseModel):
+    """Structured fields extracted by AI from iPhone product pages."""
+    product_title: str
+    current_price: float   # USD single payment, no $ or commas
     stock_status:  str
 
 
@@ -87,10 +98,18 @@ def _send_ntfy(title: str, body: str, priority: str = "default", tags: str = "")
     print(f"    ❌ ntfy: all 3 attempts failed — alert '{safe_title}' was NOT delivered.")
 
 
-def notify_price_drop(product_title: str, price: float, stock_status: str, url: str) -> None:
+def _ntfy_title_for_type(product_type: str, prefix: str) -> str:
+    """Return a contextual ntfy title based on tracker type."""
+    if product_type == "iphone_price":
+        return f"{prefix}iPhone Price Drop!"
+    return f"{prefix}B&H MacBook Price Drop!"
+
+
+def notify_price_drop(product_title: str, price: float, stock_status: str,
+                      url: str, product_type: str = "bh_price") -> None:
     """Send a high-priority price-drop alert."""
     _send_ntfy(
-        title="B&H MacBook Price Drop!",
+        title=_ntfy_title_for_type(product_type, ""),
         body=f"Price dropped to ${price:.2f}\n{product_title}\nStock: {stock_status}\n{url}",
         priority="high",
         tags="rotating_light,apple,moneybag",
@@ -99,12 +118,14 @@ def notify_price_drop(product_title: str, price: float, stock_status: str, url: 
 
 
 def notify_price_report(product_title: str, price: float, threshold: float,
-                        stock_status: str, url: str) -> None:
+                        stock_status: str, url: str,
+                        product_type: str = "bh_price") -> None:
     """Send a report-mode notification showing the real extracted price vs threshold."""
     gap = price - threshold
     vs_threshold = f"${gap:+.2f} vs threshold ${threshold:.2f}"
+    report_label = "iPhone" if product_type == "iphone_price" else "B&H"
     _send_ntfy(
-        title="[Report] B&H Price Check",
+        title=f"[Report] {report_label} Price Check",
         body=f"Current price: ${price:.2f}\n{vs_threshold}\n{product_title}\nStock: {stock_status}\n{url}",
         priority="default",
         tags="chart_with_upwards_trend,apple",
@@ -200,6 +221,13 @@ def select_provider(min_credits_needed: int) -> tuple[str, object]:
 _PRICE_PROMPT = (
     "Extract the product title, the current retail price in USD as a plain "
     "float (no currency symbols, no commas), and the stock availability status."
+)
+
+_IPHONE_PRICE_PROMPT = (
+    "Extract the product title, the current full retail price (single "
+    "payment, not monthly installment) in USD as a plain float (no currency "
+    "symbols, no commas), and the stock availability status. "
+    "Important: return the one-time purchase price, NOT a monthly payment."
 )
 
 MAX_RETRIES   = 1 if IS_TEST else 3
@@ -343,6 +371,59 @@ def _extract_price_once(provider: str, client, url: str) -> dict | None:
         return None
 
 
+def _extract_iphone_price_once(provider: str, client, url: str) -> dict | None:
+    """LLM-only extraction for iPhone product pages (BestBuy, Verizon).
+
+    Unlike B&H products, these sites have no stable data-selenium attributes
+    for regex parsing, so we go straight to LLM structured extraction.
+    """
+    schema = IPhoneProductSchema.model_json_schema()
+    prompt = _IPHONE_PRICE_PROMPT
+
+    if provider == "sgai":
+        from scrapegraph_py import FetchConfig
+        try:
+            print("      🔍 SGAI: LLM structured extraction for iPhone...")
+            result = client.extract(
+                url=url,
+                schema=schema,
+                prompt=prompt,
+                fetch_config=FetchConfig(mode="js", stealth=True, wait=3000),
+            )
+            if result.status == "error":
+                print(f"      ⚠️  SGAI extraction error: {result.error}")
+                return None
+            json_data = result.data.json_data
+            if not json_data:
+                print("      ⚠️  SGAI: json_data empty or malformed.")
+                return None
+            return json_data
+        except Exception as exc:
+            print(f"      ⚠️  SGAI exception: {exc}")
+            return None
+    else:
+        try:
+            print("      🔍 Firecrawl: LLM structured extraction for iPhone...")
+            doc = client.scrape(
+                url,
+                formats=[
+                    {
+                        "type": "json",
+                        "schema": schema,
+                        "prompt": prompt
+                    }
+                ]
+            )
+            if hasattr(doc, "json") and doc.json is not None:
+                if isinstance(doc.json, dict) and "current_price" in doc.json:
+                    return doc.json
+            print("      ⚠️  Firecrawl: 'json' field empty or malformed.")
+            return None
+        except Exception as exc:
+            print(f"      ⚠️  Firecrawl exception: {exc}")
+            return None
+
+
 def try_extract_product(
     provider: str,
     client,
@@ -355,7 +436,11 @@ def try_extract_product(
     """
     name  = product["name"]
     url   = product["url"]
+    ptype = product.get("type", "bh_price")
     tag   = f" [{label}]" if label else ""
+
+    # Select extraction function based on tracker type
+    extract_fn = _extract_iphone_price_once if ptype == "iphone_price" else _extract_price_once
 
     print(f"\n→ {name}{tag} [{provider.upper()}]")
     print(f"  URL: {url}")
@@ -363,7 +448,7 @@ def try_extract_product(
     for attempt in range(1, MAX_RETRIES + 1):
         print(f"  Attempt {attempt}/{MAX_RETRIES}...")
         try:
-            data = _extract_price_once(provider, client, url)
+            data = extract_fn(provider, client, url)
             if data is not None:
                 return data
         except Exception as exc:
@@ -379,11 +464,28 @@ def try_extract_product(
 
 
 def load_active_products() -> list[dict]:
-    """Load tracker_config.json and return only bh_price entries where active == true."""
+    """Load tracker_config.json and return active bh_price + iphone_price entries.
+
+    Respects the optional start_date field: entries with a future start_date
+    are skipped until that date arrives.
+    """
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         config = json.load(f)
-    all_products = [t for t in config.get("trackers", []) if t.get("type") == "bh_price"]
-    return [p for p in all_products if p.get("active", False)]
+    valid_types = ("bh_price", "iphone_price")
+    all_products = [t for t in config.get("trackers", []) if t.get("type") in valid_types]
+    today = datetime.date.today()
+    active = []
+    for p in all_products:
+        if not p.get("active", False):
+            continue
+        start_date_str = p.get("start_date")
+        if start_date_str:
+            start = datetime.date.fromisoformat(start_date_str)
+            if today < start:
+                print(f"  ⏳ Skipping '{p['name']}' — starts on {start_date_str}")
+                continue
+        active.append(p)
+    return active
 
 
 def extract_product_data(provider: str, client, product: dict) -> dict | None:
@@ -486,13 +588,16 @@ def process_product_result(product: dict, json_data: dict | None) -> None:
 
     # ── Notification ───────────────────────────────────────────────────────────
     display_title = product_title if PRICE_OVERRIDE is None else name
+    ptype = product.get("type", "bh_price")
 
     if REPORT_MODE:
         print("  📊 REPORT MODE — sending price report regardless of threshold.")
-        notify_price_report(display_title, price, threshold, stock_status, url)
+        notify_price_report(display_title, price, threshold, stock_status, url,
+                            product_type=ptype)
     elif price < threshold:
         print("  🚨 BELOW THRESHOLD — sending alert!")
-        notify_price_drop(display_title, price, stock_status, url)
+        notify_price_drop(display_title, price, stock_status, url,
+                          product_type=ptype)
     else:
         gap = price - threshold
         print(f"  ✅ Above threshold by ${gap:.2f} — no alert.")
@@ -524,7 +629,7 @@ def main() -> None:
 
     products = load_active_products()
     if not products:
-        print("No active bh_price entries in tracker_config.json. Nothing to check.")
+        print("No active price tracker entries in tracker_config.json. Nothing to check.")
         sys.exit(0)
 
     print(f"🔍 Checking {len(products)} active product(s).\n")

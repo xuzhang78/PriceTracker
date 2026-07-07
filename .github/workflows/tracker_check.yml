@@ -18,18 +18,18 @@ on:
         options:
           - auto
           - dealmoon
-          - bh
+          - prices
           - both
       include_expired:
         description: "Dealmoon: set 'true' to include expired deals (E2E pipeline test)"
         required: false
         default: "false"
       price_override:
-        description: "B&H: simulate a price drop (e.g. 2499.00). Leave blank for live check."
+        description: "Prices: simulate a price drop (e.g. 1299.00). Leave blank for live check."
         required: false
         default: ""
       report_mode:
-        description: "B&H: set 'true' to do real extraction and always notify with actual price (pipeline verification)"
+        description: "Prices: set 'true' to do real extraction and always notify with actual price (pipeline verification)"
         required: false
         default: "false"
 
@@ -48,9 +48,9 @@ jobs:
         run: |
           override="${{ inputs.run_tracker || 'auto' }}"
 
-          if [ "$override" = "bh" ]; then
+          if [ "$override" = "prices" ]; then
             echo "skip=true" >> $GITHUB_OUTPUT
-            echo "⏭️  Skipped — run_tracker=bh"
+            echo "⏭️  Skipped — run_tracker=prices"
             exit 0
           fi
 
@@ -88,10 +88,10 @@ jobs:
           TESTING:           ${{ github.event_name == 'workflow_dispatch' && 'true' || 'false' }}
         run: python check_deals.py
 
-# ── Subagent: B&H Price Check ──────────────────────────────────────────────────
-  bh-prices:
-    name: "B&H Price Check"
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_tracker == 'auto' || inputs.run_tracker == 'bh' || inputs.run_tracker == 'both' }}
+# ── Subagent: Price Check (B&H + iPhone) ───────────────────────────────────────
+  prices:
+    name: "Price Check"
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_tracker == 'auto' || inputs.run_tracker == 'prices' || inputs.run_tracker == 'both' }}
     runs-on: ubuntu-latest
 
     steps:
@@ -108,19 +108,19 @@ jobs:
             exit 0
           fi
 
-          if [ "$override" = "bh" ] || [ "$override" = "both" ]; then
+          if [ "$override" = "prices" ] || [ "$override" = "both" ]; then
             echo "skip=false" >> $GITHUB_OUTPUT
             echo "✅ Targeted by run_tracker=$override"
             exit 0
           fi
 
-          count=$(jq '[.trackers[] | select(.type == "bh_price" and .active == true)] | length' tracker_config.json)
+          count=$(jq '[.trackers[] | select((.type == "bh_price" or .type == "iphone_price") and .active == true)] | length' tracker_config.json)
           if [ "$count" -gt 0 ]; then
             echo "skip=false" >> $GITHUB_OUTPUT
-            echo "✅ $count active B&H product(s) found — proceeding"
+            echo "✅ $count active price tracker product(s) found — proceeding"
           else
             echo "skip=true" >> $GITHUB_OUTPUT
-            echo "⏭️  No active bh_price entries — skipping"
+            echo "⏭️  No active price tracker entries — skipping"
           fi
 
       - uses: actions/setup-python@v6
@@ -132,7 +132,7 @@ jobs:
         if: steps.gate.outputs.skip != 'true'
         run: pip install -r requirements.txt
 
-      - name: Run B&H price check
+      - name: Run price check
         if: steps.gate.outputs.skip != 'true'
         env:
           SGAI_API_KEY:      ${{ secrets.SGAI_API_KEY }}
