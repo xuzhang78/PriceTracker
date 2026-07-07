@@ -8,10 +8,10 @@ Reads tracker_config.json and tracks prices for:
 Sends an ntfy.sh push notification when price drops below the configured
 threshold. Supports a start_date field to delay tracking until a future date.
 
-Extraction provider selection (automatic):
-  1. Check SGAI credit balance. If credits >= cost of one full run, use
-     ScrapeGraphAI.
-  2. If SGAI credits are exhausted or below threshold, fall back to Firecrawl.
+Extraction provider hierarchy:
+  1. Primary:   Firecrawl (LLM structured extraction with JS rendering)
+  2. Secondary: ScraperAPI proxy + Google Gemini LLM
+  3. Tertiary:  Scrape.do proxy + Google Gemini LLM
 
 Run modes:
   Normal run:       python check_prices.py
@@ -36,12 +36,12 @@ import requests
 from google import genai
 from dotenv import load_dotenv
 from pydantic import BaseModel
+from utils import send_ntfy, select_provider, clean_html
 
 # ── Configuration ──────────────────────────────────────────────────────────────
 
 load_dotenv()
 
-SGAI_API_KEY        = os.getenv("SGAI_API_KEY", "")
 FIRECRAWL_API_KEY   = os.getenv("FIRECRAWL_API_KEY", "")
 SCRAPERAPI_KEY      = os.getenv("SCRAPERAPI_KEY", "")
 SCRAPE_DO_KEY       = os.getenv("SCRAPE_DO_KEY", "")
@@ -81,26 +81,6 @@ class IPhoneProductSchema(BaseModel):
 
 # ── Notification Helpers ───────────────────────────────────────────────────────
 
-def _send_ntfy(title: str, body: str, priority: str = "default", tags: str = "") -> None:
-    """POST a push notification to ntfy.sh with ASCII-safe header, up to 3 attempts."""
-    safe_title = title.encode("ascii", errors="replace").decode("ascii")
-    for attempt in range(1, 4):
-        try:
-            response = requests.post(
-                f"https://ntfy.sh/{NTFY_TOPIC}",
-                data=body.encode("utf-8"),
-                headers={"Title": safe_title, "Priority": priority, "Tags": tags},
-                timeout=10,
-            )
-            response.raise_for_status()
-            return
-        except requests.RequestException as exc:
-            print(f"    ⚠️  ntfy send attempt {attempt}/3 failed: {exc}")
-            if attempt < 3:
-                time.sleep(5)
-    print(f"    ❌ ntfy: all 3 attempts failed — alert '{safe_title}' was NOT delivered.")
-
-
 def _ntfy_title_for_type(product_type: str, prefix: str) -> str:
     """Return a contextual ntfy title based on tracker type."""
     if product_type == "iphone_price":
@@ -111,7 +91,7 @@ def _ntfy_title_for_type(product_type: str, prefix: str) -> str:
 def notify_price_drop(product_title: str, price: float, stock_status: str,
                       url: str, product_type: str = "bh_price") -> None:
     """Send a high-priority price-drop alert."""
-    _send_ntfy(
+    send_ntfy(
         title=_ntfy_title_for_type(product_type, ""),
         body=f"Price dropped to ${price:.2f}\n{product_title}\nStock: {stock_status}\n{url}",
         priority="high",
@@ -127,7 +107,7 @@ def notify_price_report(product_title: str, price: float, threshold: float,
     gap = price - threshold
     vs_threshold = f"${gap:+.2f} vs threshold ${threshold:.2f}"
     report_label = "iPhone" if product_type == "iphone_price" else "B&H"
-    _send_ntfy(
+    send_ntfy(
         title=f"[Report] {report_label} Price Check",
         body=f"Current price: ${price:.2f}\n{vs_threshold}\n{product_title}\nStock: {stock_status}\n{url}",
         priority="default",
@@ -138,30 +118,13 @@ def notify_price_report(product_title: str, price: float, threshold: float,
 
 def notify_extraction_error(product_name: str, reason: str) -> None:
     """Send a warning alert when extraction fails or sanity check fails."""
-    _send_ntfy(
+    send_ntfy(
         title="Price Tracker — Extraction Error",
         body=f"Failed to extract price for:\n{product_name}\n\nReason: {reason}",
         priority="default",
         tags="warning",
     )
     print("    ⚠️  Error alert sent via ntfy!")
-
-
-# ── Provider Selection ─────────────────────────────────────────────────────────
-
-def select_provider() -> tuple[str, object]:
-    """
-    Selects Firecrawl as the primary extraction provider.
-    """
-    print("🔌 Selecting extraction provider...")
-
-    if FIRECRAWL_API_KEY:
-        print("  ✅ Firecrawl configured as primary provider.")
-        from firecrawl import FirecrawlApp
-        return "firecrawl", FirecrawlApp(api_key=FIRECRAWL_API_KEY)
-
-    print("  ℹ️ Firecrawl is not configured. Relying on backup proxies (ScraperAPI / Scrape.do) + Gemini.")
-    return "none", None
 
 
 # ── Extraction ─────────────────────────────────────────────────────────────────
@@ -241,88 +204,54 @@ def parse_bh_product_html(html: str) -> dict | None:
 
 
 def _extract_price_once(provider: str, client, url: str) -> dict | None:
-    """Perform a single-attempt extraction using either ScrapeGraphAI or Firecrawl."""
+    """Perform a single-attempt B&H price extraction via Firecrawl.
+
+    Strategy: fetch raw HTML first and attempt regex parsing (zero LLM cost).
+    If regex fails, fall back to Firecrawl LLM structured extraction.
+    """
     html_content = None
 
-    if provider == "sgai":
-        from scrapegraph_py import FetchConfig, HtmlFormatConfig
-        try:
-            print("      🔍 SGAI: Fetching raw HTML (1 credit)...")
-            result = client.scrape(
-                url=url,
-                formats=[HtmlFormatConfig(mode="normal")],
-                fetch_config=FetchConfig(mode="js", stealth=True, wait=2000),
-            )
-            if result.status == "error":
-                print(f"      ⚠️  SGAI html scrape error: {result.error}")
-            elif hasattr(result, "data") and result.data is not None:
-                results_dict = getattr(result.data, "results", {})
-                html_dict = results_dict.get("html", {})
-                if isinstance(html_dict, dict):
-                    html_content = html_dict.get("data")
-                else:
-                    html_content = html_dict
-        except Exception as exc:
-            print(f"      ⚠️  SGAI html scrape exception: {exc}")
-    else:
-        try:
-            print("      🔍 Firecrawl: Fetching raw HTML (1 credit)...")
-            doc = client.scrape(
-                url,
-                formats=["html"]
-            )
-            if hasattr(doc, "html") and doc.html:
-                html_content = doc.html
-            elif isinstance(doc, dict) and "html" in doc:
-                html_content = doc["html"]
-        except Exception as exc:
-            print(f"      ⚠️  Firecrawl html scrape exception: {exc}")
+    try:
+        print("      🔍 Firecrawl: Fetching raw HTML (1 credit)...")
+        doc = client.scrape(
+            url,
+            formats=["html"]
+        )
+        if hasattr(doc, "html") and doc.html:
+            html_content = doc.html
+        elif isinstance(doc, dict) and "html" in doc:
+            html_content = doc["html"]
+    except Exception as exc:
+        print(f"      ⚠️  Firecrawl html scrape exception: {exc}")
 
     # Parse HTML using regex
     if html_content:
         parsed = parse_bh_product_html(html_content)
         if parsed and parsed.get("product_title") and parsed.get("current_price") > 0.0:
-            print(f"      🎯 {provider.upper()}: Successfully parsed product details via HTML regex (Save successful!).")
+            print(f"      🎯 FIRECRAWL: Successfully parsed product details via HTML regex (Save successful!).")
             return parsed
         else:
-            print(f"      ⚠️  {provider.upper()}: Regex parsing returned incomplete data (Title: {parsed.get('product_title') if parsed else 'None'}, Price: {parsed.get('current_price') if parsed else 'None'}).")
+            print(f"      ⚠️  FIRECRAWL: Regex parsing returned incomplete data (Title: {parsed.get('product_title') if parsed else 'None'}, Price: {parsed.get('current_price') if parsed else 'None'}).")
     else:
-        print(f"      ⚠️  {provider.upper()}: Failed to fetch HTML content.")
+        print(f"      ⚠️  FIRECRAWL: Failed to fetch HTML content.")
 
     # Fallback to LLM structured extraction if html-only scrape or regex parsing failed
-    print(f"      🔄 {provider.upper()}: Falling back to LLM structured extraction...")
-    if provider == "sgai":
-        from scrapegraph_py import FetchConfig
-        result = client.extract(
-            url=url,
-            schema=MacBookProductSchema.model_json_schema(),
-            prompt=_PRICE_PROMPT,
-            fetch_config=FetchConfig(mode="js", stealth=True, wait=2000),
-        )
-        if result.status == "error":
-            print(f"      ⚠️  SGAI LLM fallback error: {result.error}")
-            return None
-        json_data = result.data.json_data
-        if not json_data:
-            print(f"      ⚠️  SGAI: LLM fallback json_data empty or malformed.")
-            return None
-        return json_data
-    else:
-        doc = client.scrape(
-            url,
-            formats=[
-                {
-                    "type": "json",
-                    "schema": MacBookProductSchema.model_json_schema(),
-                    "prompt": _PRICE_PROMPT
-                }
-            ]
-        )
-        if hasattr(doc, "json") and doc.json is not None:
-            if isinstance(doc.json, dict) and "current_price" in doc.json:
-                return doc.json
-        print("      ⚠️  Firecrawl: LLM fallback 'json' field empty or malformed.")
-        return None
+    print(f"      🔄 FIRECRAWL: Falling back to LLM structured extraction...")
+    doc = client.scrape(
+        url,
+        formats=[
+            {
+                "type": "json",
+                "schema": MacBookProductSchema.model_json_schema(),
+                "prompt": _PRICE_PROMPT
+            }
+        ]
+    )
+    if hasattr(doc, "json") and doc.json is not None:
+        if isinstance(doc.json, dict) and "current_price" in doc.json:
+            return doc.json
+    print("      ⚠️  Firecrawl: LLM fallback 'json' field empty or malformed.")
+    return None
 
 
 def _extract_iphone_price_once(provider: str, client, url: str) -> dict | None:
@@ -331,8 +260,6 @@ def _extract_iphone_price_once(provider: str, client, url: str) -> dict | None:
     Unlike B&H products, these sites have no stable data-selenium attributes
     for regex parsing, so we go straight to LLM structured extraction.
     """
-    if provider == "sgai":
-        return None
 
     schema = IPhoneProductSchema.model_json_schema()
     prompt = _IPHONE_PRICE_PROMPT
@@ -444,39 +371,12 @@ def load_active_products() -> list[dict]:
     return active
 
 
-def clean_html(html: str) -> str:
-    """Remove bloat from HTML (CSS styles, SVG vectors, images, comments, unneeded scripts) to save LLM tokens."""
-    import re
-    if not html:
-        return ""
-    # 1. Remove style tags
-    html = re.sub(r'<style[^>]*>.*?</style>', '', html, flags=re.DOTALL | re.IGNORECASE)
-    # 2. Remove SVG elements
-    html = re.sub(r'<svg[^>]*>.*?</svg>', '', html, flags=re.DOTALL | re.IGNORECASE)
-    # 3. Remove comments
-    html = re.sub(r'<!---->|<!--.*?-->', '', html, flags=re.DOTALL)
-    # 4. Remove unneeded script tags, but keep ones containing important catalog data
-    def script_replacer(match):
-        script_content = match.group(0)
-        markers = ["sku6037331", "currentPrice", "buyProductMaxPurch", "regularPrice", "productTitle", "addButtonState"]
-        if any(m in script_content for m in markers):
-            return script_content  # Keep
-        return ""  # Discard
-    html = re.sub(r'<script[^>]*>.*?</script>', script_replacer, html, flags=re.DOTALL | re.IGNORECASE)
-    # 5. Compress multiple newlines and spaces
-    html = re.sub(r'\n\s*\n', '\n', html)
-    return html.strip()
-
-
 def _extract_via_proxy_and_gemini(provider: str, proxy_key: str, url: str, schema: dict, prompt: str) -> dict | None:
     """Fetch HTML using ScraperAPI or Scrape.do proxy, and extract structured JSON using Gemini LLM."""
     if not GEMINI_API_KEY:
         print("      ⚠️  Gemini: GEMINI_API_KEY not configured. Cannot perform LLM extraction.")
         return None
 
-    import requests
-    import json
-    
     html_content = ""
     try:
         if provider == "scraperapi":
@@ -516,7 +416,7 @@ def _extract_via_proxy_and_gemini(provider: str, proxy_key: str, url: str, schem
         from google.genai import types
         
         # Clean HTML to minimize tokens and prevent truncation
-        cleaned_html = clean_html(html_content)
+        cleaned_html = clean_html(html_content, keep_catalog_scripts=True)
         
         # Initialize unified Client
         client = genai.Client(api_key=GEMINI_API_KEY)

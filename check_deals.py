@@ -1,21 +1,18 @@
 """
 Dealmoon BOGO Sale Event Tracker
 ---------------------------------
-Reads deals_config.json, extracts deals via AI, and sends an ntfy.sh push
+Reads tracker_config.json, extracts deals via AI, and sends an ntfy.sh push
 notification when a new active "Buy One Get One" (BOGO) deal is detected.
 
-Extraction provider selection (automatic):
-  1. Check SGAI credit balance. If credits >= cost of one full run (10 per brand),
-     use ScrapeGraphAI (managed browser proxy, high reliability).
-  2. If SGAI credits are exhausted or below threshold, automatically fall back
-     to Firecrawl (comparable capability, separate free tier).
-  Both providers require their own API key set in .env / GitHub Secrets.
+Extraction provider hierarchy:
+  1. Primary:   Firecrawl (LLM structured extraction with JS rendering)
+  2. Secondary: ScraperAPI proxy + Google Gemini LLM
+  3. Tertiary:  Scrape.do proxy + Google Gemini LLM
 
 Retry logic:
-  1. Extract Lancome (up to 3 attempts), then Clinique (up to 3 attempts).
-  2. If Lancome failed AND Clinique succeeded → retry Lancome up to 3 more times.
-  3. If ALL brands failed → wait FLOW_RETRY_WAIT hours, retry entire flow once.
-  4. If retry flow also fails → send error notification and exit 1.
+  1. Extract each brand (up to 3 attempts), with Lancome-priority retry.
+  2. If ALL brands failed → wait FLOW_RETRY_WAIT hours, retry entire flow once.
+  3. If retry flow also fails → send error notification and exit 1.
 
 URL logic:
   Config stores baseline URL (expiredClick=n&exp=y = all deals incl. expired).
@@ -23,7 +20,7 @@ URL logic:
   INCLUDE_EXPIRED mode keeps the baseline URL as-is.
 
 State management:
-  deals_state.json tracks notified deal titles to prevent duplicate alerts.
+  deals_state.json tracks notified deal IDs and titles to prevent duplicates.
 
 Expired deal detection (3 layers):
   1. Server-side: exp=n in URL so Dealmoon never serves expired content.
@@ -50,12 +47,12 @@ import requests
 from google import genai
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
+from utils import send_ntfy, select_provider, clean_html
 
 # ── Configuration ──────────────────────────────────────────────────────────────
 
 load_dotenv()
 
-SGAI_API_KEY        = os.getenv("SGAI_API_KEY", "")
 FIRECRAWL_API_KEY   = os.getenv("FIRECRAWL_API_KEY", "")
 SCRAPERAPI_KEY      = os.getenv("SCRAPERAPI_KEY", "")
 SCRAPE_DO_KEY       = os.getenv("SCRAPE_DO_KEY", "")
@@ -106,7 +103,7 @@ def load_state() -> dict:
         with open(STATE_PATH, "r", encoding="utf-8") as f:
             return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
-        return {"notified_titles": []}
+        return {"notified_titles": [], "notified_ids": []}
 
 
 def save_state(state: dict) -> None:
@@ -114,39 +111,35 @@ def save_state(state: dict) -> None:
         json.dump(state, f, indent=2, ensure_ascii=False)
 
 
-def already_notified(state: dict, title: str) -> bool:
-    return title in state.get("notified_titles", [])
+def _deal_id_from_url(deal_url: str) -> str | None:
+    """Extract the numeric deal ID from a Dealmoon URL (e.g. '5881094' from '.../5881094.html')."""
+    m = re.search(r'/(\d+)\.html', deal_url)
+    return m.group(1) if m else None
 
 
-def mark_notified(state: dict, title: str) -> None:
+def already_notified(state: dict, title: str, deal_url: str = "") -> bool:
+    """Check both title-based (legacy) and ID-based dedup."""
+    if title in state.get("notified_titles", []):
+        return True
+    deal_id = _deal_id_from_url(deal_url)
+    if deal_id and deal_id in state.get("notified_ids", []):
+        return True
+    return False
+
+
+def mark_notified(state: dict, title: str, deal_url: str = "") -> None:
+    """Record both title and deal ID for dedup."""
     state.setdefault("notified_titles", []).append(title)
+    deal_id = _deal_id_from_url(deal_url)
+    if deal_id:
+        state.setdefault("notified_ids", []).append(deal_id)
 
 
 # ── Notification Helpers ───────────────────────────────────────────────────────
 
-def _send_ntfy(title: str, body: str, priority: str = "default", tags: str = "") -> None:
-    """POST a push notification to ntfy.sh with ASCII-safe header, up to 3 attempts."""
-    safe_title = title.encode("ascii", errors="replace").decode("ascii")
-    for attempt in range(1, 4):
-        try:
-            response = requests.post(
-                f"https://ntfy.sh/{NTFY_TOPIC}",
-                data=body.encode("utf-8"),
-                headers={"Title": safe_title, "Priority": priority, "Tags": tags},
-                timeout=10,
-            )
-            response.raise_for_status()
-            return
-        except requests.RequestException as exc:
-            print(f"    ⚠️  ntfy send attempt {attempt}/3 failed: {exc}")
-            if attempt < 3:
-                time.sleep(5)
-    print(f"    ❌ ntfy: all 3 attempts failed — alert '{safe_title}' was NOT delivered.")
-
-
 def notify_bogo_deal(brand: str, deal_title: str, description: str, deal_date: str) -> None:
     date_line = f"Posted: {deal_date}\n" if deal_date else ""
-    _send_ntfy(
+    send_ntfy(
         title=f"🛍️ {brand} BOGO Sale on Dealmoon!",
         body=f"{deal_title}\n{date_line}\n{description}",
         priority="high",
@@ -156,7 +149,7 @@ def notify_bogo_deal(brand: str, deal_title: str, description: str, deal_date: s
 
 
 def notify_extraction_error(brands: list[str], provider: str) -> None:
-    _send_ntfy(
+    send_ntfy(
         title="Deal Tracker — Extraction Failed",
         body=(
             f"All extraction attempts failed for: {', '.join(brands)}\n"
@@ -167,23 +160,6 @@ def notify_extraction_error(brands: list[str], provider: str) -> None:
         tags="warning",
     )
     print("  ⚠️  Error alert sent via ntfy!")
-
-
-# ── Provider Selection ─────────────────────────────────────────────────────────
-
-def select_provider() -> tuple[str, object]:
-    """
-    Selects Firecrawl as the primary extraction provider.
-    """
-    print("🔌 Selecting extraction provider...")
-
-    if FIRECRAWL_API_KEY:
-        print("  ✅ Firecrawl configured as primary provider.")
-        from firecrawl import FirecrawlApp
-        return "firecrawl", FirecrawlApp(api_key=FIRECRAWL_API_KEY)
-
-    print("  ℹ️ Firecrawl is not configured. Relying on backup proxies (ScraperAPI / Scrape.do) + Gemini.")
-    return "none", None
 
 
 # ── Core Extraction ────────────────────────────────────────────────────────────
@@ -252,34 +228,7 @@ def parse_dates_from_html(html: str) -> dict[str, str]:
     return deal_times
 
 
-def _extract_once_sgai(client, url: str, include_expired: bool) -> dict | None:
-    """Single ScrapeGraphAI extraction attempt. Returns json_data dict or None."""
-    from scrapegraph_py import FetchConfig
-    expired_instruction = (
-        "Include both active and expired deals." if include_expired
-        else "Only include active (non-expired) deals."
-    )
-    try:
-        result = client.extract(
-            url=url,
-            schema=DealmoonSchema.model_json_schema(),
-            prompt=_EXTRACTION_PROMPT.format(expired_instruction=expired_instruction),
-            fetch_config=FetchConfig(mode="js", stealth=True, wait=4000),
-        )
-        if result.status != "success":
-            print(f"      ⚠️  SGAI error: {result.error}")
-            return None
-        data = result.data.json_data
-        if not data or not isinstance(data, dict):
-            print("      ⚠️  SGAI: json_data empty or malformed.")
-            return None
-        return data
-    except Exception as exc:
-        print(f"      ⚠️  SGAI exception: {exc}")
-        return None
-
-
-def _extract_once_firecrawl(client, url: str, include_expired: bool) -> dict | None:
+def _extract_once(client, url: str, include_expired: bool) -> dict | None:
     """Single Firecrawl extraction attempt. Returns deals-schema dict or None."""
     expired_instruction = (
         "Include both active and expired deals." if include_expired
@@ -310,14 +259,6 @@ def _extract_once_firecrawl(client, url: str, include_expired: bool) -> dict | N
         return None
 
 
-def _extract_once(provider: str, client, url: str, include_expired: bool) -> dict | None:
-    """Dispatcher: routes to the correct provider's extraction function."""
-    if provider == "sgai":
-        return _extract_once_sgai(client, url, include_expired)
-    else:
-        return _extract_once_firecrawl(client, url, include_expired)
-
-
 # ── Brand Extraction with Retry ────────────────────────────────────────────────
 
 def try_extract_brand(
@@ -340,7 +281,7 @@ def try_extract_brand(
 
     for attempt in range(1, MAX_RETRIES + 1):
         print(f"  Attempt {attempt}/{MAX_RETRIES}...")
-        data = _extract_once(provider, client, url, include_expired)
+        data = _extract_once(client, url, include_expired)
         if data is not None:
             deals = data.get("deals", [])
             
@@ -371,22 +312,6 @@ def try_extract_brand(
     return None
 
 
-def clean_html(html: str) -> str:
-    """Remove bloat from HTML (CSS styles, SVG vectors, images, comments, scripts) to save LLM tokens."""
-    import re
-    if not html:
-        return ""
-    # 1. Remove style tags
-    html = re.sub(r'<style[^>]*>.*?</style>', '', html, flags=re.DOTALL | re.IGNORECASE)
-    # 2. Remove SVG elements
-    html = re.sub(r'<svg[^>]*>.*?</svg>', '', html, flags=re.DOTALL | re.IGNORECASE)
-    # 3. Remove comments
-    html = re.sub(r'<!---->|<!--.*?-->', '', html, flags=re.DOTALL)
-    # 4. Remove all script tags
-    html = re.sub(r'<script[^>]*>.*?</script>', '', html, flags=re.DOTALL | re.IGNORECASE)
-    # 5. Compress multiple newlines and spaces
-    html = re.sub(r'\n\s*\n', '\n', html)
-    return html.strip()
 
 
 def _extract_deals_via_proxy_and_gemini(provider: str, proxy_key: str, url: str, schema: dict, prompt: str) -> list[dict] | None:
@@ -395,9 +320,6 @@ def _extract_deals_via_proxy_and_gemini(provider: str, proxy_key: str, url: str,
         print("      ⚠️  Gemini: GEMINI_API_KEY not configured. Cannot perform LLM extraction.")
         return None
 
-    import requests
-    import json
-    
     html_content = ""
     try:
         if provider == "scraperapi":
@@ -672,12 +594,13 @@ def process_results(
             print(f"       Date:   {deal_date or 'N/A'}")
             print(f"       Status: {'EXPIRED' if is_expired else 'ACTIVE'}")
 
-            if already_notified(state, title):
+            deal_url = deal.get("deal_url", "")
+            if already_notified(state, title, deal_url):
                 print("       ℹ️  Already notified — skipping.")
                 continue
 
             notify_bogo_deal(brand_name, title, description, deal_date)
-            mark_notified(state, title)
+            mark_notified(state, title, deal_url)
             state_modified = True
 
     return state_modified
@@ -690,9 +613,8 @@ def main() -> None:
     if not NTFY_TOPIC:
         print("❌ Missing NTFY_TOPIC. Set it in .env or GitHub Secrets.")
         sys.exit(1)
-    if not FIRECRAWL_API_KEY:
-        print("❌ Firecrawl is not configured. Set FIRECRAWL_API_KEY in .env or GitHub Secrets.")
-        sys.exit(1)
+    if not FIRECRAWL_API_KEY and not SCRAPERAPI_KEY:
+        print("⚠️  No API keys configured (FIRECRAWL_API_KEY / SCRAPERAPI_KEY).")
 
     if INCLUDE_EXPIRED:
         print("⚠️  Running in INCLUDE_EXPIRED mode — expired deals processed for E2E testing.\n")
