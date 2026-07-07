@@ -168,7 +168,8 @@ def select_provider() -> tuple[str, object]:
 
 _PRICE_PROMPT = (
     "Extract the product title, the current retail price in USD as a plain "
-    "float (no currency symbols, no commas), and the stock availability status."
+    "float (no currency symbols, no commas), and the stock availability status. "
+    "For stock status, extract the shipping availability status (specifically whether it is available for shipping, ignoring local store pickup availability)."
 )
 
 _IPHONE_PRICE_PROMPT = (
@@ -179,7 +180,8 @@ _IPHONE_PRICE_PROMPT = (
     "If the page shows multiple storage sizes or variants (e.g. 256GB, 512GB, 1TB), "
     "specifically extract the price for the 512GB variant. "
     "For Verizon: look for the 512GB storage model (SKU 'sku6037331') in the page content or embedded catalog JSON script tags "
-    "and extract its full purchase price (usually $1399.99)."
+    "and extract its full purchase price (usually $1399.99). "
+    "For stock status: extract the shipping availability status (specifically whether it is available for shipping, ignoring local store pickup availability)."
 )
 
 MAX_RETRIES   = 1 if IS_TEST else 3
@@ -456,7 +458,7 @@ def _extract_via_proxy_and_gemini(provider: str, proxy_key: str, url: str, schem
         if provider == "scraperapi":
             print(f"      🔍 ScraperAPI proxy: Fetching HTML for {url}...")
             params = {'api_key': proxy_key, 'url': url}
-            if "bestbuy" in url or "verizon" in url or "bhphotovideo" in url:
+            if "bestbuy" in url or "bhphotovideo" in url:
                 params['render'] = 'true'
             r = requests.get('https://api.scraperapi.com/', params=params, timeout=90)
             if r.status_code == 200:
@@ -467,7 +469,7 @@ def _extract_via_proxy_and_gemini(provider: str, proxy_key: str, url: str, schem
         elif provider == "scrapedo":
             print(f"      🔍 Scrape.do proxy: Fetching HTML for {url}...")
             params = {'token': proxy_key, 'url': url}
-            if "bestbuy" in url or "verizon" in url or "bhphotovideo" in url:
+            if "bestbuy" in url or "bhphotovideo" in url:
                 params['render'] = 'true'
             r = requests.get('https://api.scrape.do', params=params, timeout=90)
             if r.status_code == 200:
