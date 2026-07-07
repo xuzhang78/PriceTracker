@@ -91,38 +91,11 @@ GitHub Actions (cron: 0 9 * * *)
 ## 4. API & SDK — Critical Implementation Details
 
 > [!IMPORTANT]
-> This section documents developer knowledge for ScrapeGraphAI (SGAI) and Firecrawl. Read before modifying `check_prices.py`.
-
-### Python Version Requirement
-
-`scrapegraph-py` v2.x requires **Python 3.12+**, NOT 3.11 or earlier.
-
-```
-# From pip error:
-ERROR: 2.0.1 Requires-Python >=3.12
-ERROR: 2.1.0 Requires-Python >=3.12
-```
-
-The GitHub Actions workflow uses `python-version: "3.12"` for this reason.
-
-### ScrapeGraphAI `sgai.extract()` Signature
-
-```python
-result = sgai.extract(
-    url=url,
-    schema=MacBookProductSchema.model_json_schema(),  # ← MUST be a dict, not the class
-    prompt=_PRICE_PROMPT,
-    fetch_config=FetchConfig(mode="js", stealth=True, wait=2000),
-)
-```
-
-**Critical:** `schema=` expects a **JSON schema dict**, not a Pydantic class.
-- ❌ `schema=MacBookProductSchema` → `ValidationError: Input should be a valid dictionary`
-- ✅ `schema=MacBookProductSchema.model_json_schema()` → works
+> This section documents developer knowledge for Firecrawl and Google Gemini API. Read before modifying `check_prices.py` or `check_deals.py`.
 
 ### Firecrawl `client.scrape()` Signature (V2 API)
 
-For Firecrawl, we migrate from `/v2/extract` (deprecated) to `/v2/scrape` with custom JSON format schemas:
+We migrate from `/v2/extract` (deprecated) to `/v2/scrape` with custom JSON format schemas:
 
 ```python
 doc = client.scrape(
@@ -137,73 +110,47 @@ doc = client.scrape(
 )
 ```
 
-### Extraction Prompt
+**Key Scrape Parameters:**
+- **Actions (clicks/waits)**: Used on Verizon to select the `512 GB` radio box variant:
+  ```python
+  scrape_params["actions"] = [
+      {"type": "click", "selector": "text=512 GB"},
+      {"type": "wait", "milliseconds": 2000}
+  ]
+  ```
+- **Timeout**: Set to `120000` (120 seconds) for BestBuy to handle dynamic rendering lag.
 
-The prompt used for price extraction is:
+### Google Gemini API (`google-genai` SDK)
+
+To parse HTML retrieved by secondary/tertiary proxy fallbacks, we use the modern `google-genai` SDK to ensure structured JSON extraction:
+
 ```python
-_PRICE_PROMPT = (
-    "Extract the product title, the current retail price in USD as a plain "
-    "float (no currency symbols, no commas), and the stock availability status."
+from google import genai
+from google.genai import types
+
+client = genai.Client(api_key=GEMINI_API_KEY)
+
+response = client.models.generate_content(
+    model="gemini-2.5-flash",
+    contents=full_prompt,
+    config=types.GenerateContentConfig(
+        response_mime_type="application/json"
+    )
 )
+
+parsed_json = json.loads(response.text.strip())
 ```
 
-### `ExtractResponse` Object Structure
+**Prompt Engineering for Variant and Stock Tracking:**
+To ensure correct variant and shipping status extraction without UI interactions on backup fetches, the prompt explicitly instructs:
+- **Variant selection**: If multiple storage sizes are shown, specifically extract the 512GB variant (locating SKU `sku6037331` for Verizon).
+- **Shipping stock status**: Target the **Shipping availability status** instead of store pickup option indicators.
 
-`sgai.extract()` returns an `ApiResult`. The actual extracted data lives at:
+### Retry & Sleep Timers
 
-```python
-result.data           # ExtractResponse object (NOT a dict, NOT the schema fields directly)
-result.data.json_data # dict | None  ← THIS is where extracted fields live (aliased from "json")
-result.data.raw       # str | None   ← raw text response (useful for debugging empty json_data)
-result.data.usage     # TokenUsage
-result.data.metadata  # dict
-```
-
-**Full `ExtractResponse` definition** (from `scrapegraph_py/schemas.py`):
-```python
-class ExtractResponse(ResponseModel):
-    raw: str | None
-    json_data: dict | None = Field(default=None, alias="json")
-    usage: TokenUsage
-    metadata: dict
-    model_config = ConfigDict(extra="allow", populate_by_name=True)
-```
-
-**Correct field access pattern:**
-```python
-json_data = result.data.json_data          # the dict
-price     = float(json_data["current_price"])
-title     = str(json_data["product_title"])
-stock     = str(json_data["stock_status"])
-```
-
-**Wrong patterns (all have been tried and failed):**
-```python
-result.data.current_price          # ❌ AttributeError: ExtractResponse has no attr 'current_price'
-MacBookProductSchema(**result.data) # ❌ TypeError: argument after ** must be a mapping, not ExtractResponse
-result.data["current_price"]       # ❌ TypeError: ExtractResponse is not subscriptable
-```
-
-### `FetchConfig` for Anti-Bot Sites
-
-```python
-from scrapegraph_py import FetchConfig
-FetchConfig(mode="js", stealth=True, wait=2000)
-```
-
-- `mode="js"`: JavaScript rendering (required for React/SPA sites, and B&H Photo)
-- `stealth=True`: Cloudflare/bot-detection bypass (+5 credits per call)
-- `wait=2000`: 2-second wait for dynamic content to load (milliseconds)
-
-### Retry Logic for 504 Gateway Timeouts
-
-504s are transient and cost **0 credits** (request fails before SGAI processes it). The script retries up to 3 times:
-
-```python
-RETRY_DELAYS = [15, 30, 60]  # seconds between attempts
-```
-
-Only fires an error notification if all 3 attempts fail. Total worst-case wait: ~105 seconds per product.
+- **Production mode**: Standard runs sleep for 2 hours on a complete failure before triggering a single E2E pipeline retry. If the retry fails, it alerts via `ntfy`.
+- **Testing mode**: Bypasses the 2-hour sleep to prevent blocking pipelines.
+- **Backoff delays**: The script wait times (`RETRY_DELAYS = [15, 30, 60]`) prevent throttling issues during transient server downtime.
 
 ---
 
