@@ -312,8 +312,6 @@ def try_extract_brand(
     return None
 
 
-
-
 def _extract_deals_via_proxy_and_gemini(provider: str, proxy_key: str, url: str, schema: dict, prompt: str) -> list[dict] | None:
     """Fetch HTML using ScraperAPI or Scrape.do proxy, and extract structured JSON using Gemini LLM."""
     if not GEMINI_API_KEY:

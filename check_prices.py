@@ -24,6 +24,7 @@ Run modes:
 import datetime
 import json
 import os
+import re
 import sys
 import time
 
@@ -153,7 +154,6 @@ RETRY_DELAYS  = [15, 30, 60]
 
 def parse_bh_product_html(html: str) -> dict | None:
     """Parses B&H product HTML using data-selenium attributes."""
-    import re
     import html as html_lib
 
     # 1. Product Title (data-selenium="productTitle" on h1)
@@ -203,7 +203,7 @@ def parse_bh_product_html(html: str) -> dict | None:
     }
 
 
-def _extract_price_once(provider: str, client, url: str) -> dict | None:
+def _extract_price_once(client, url: str) -> dict | None:
     """Perform a single-attempt B&H price extraction via Firecrawl.
 
     Strategy: fetch raw HTML first and attempt regex parsing (zero LLM cost).
@@ -254,7 +254,7 @@ def _extract_price_once(provider: str, client, url: str) -> dict | None:
     return None
 
 
-def _extract_iphone_price_once(provider: str, client, url: str) -> dict | None:
+def _extract_iphone_price_once(client, url: str) -> dict | None:
     """LLM-only extraction for iPhone product pages (BestBuy, Verizon).
 
     Unlike B&H products, these sites have no stable data-selenium attributes
@@ -328,7 +328,7 @@ def try_extract_product(
     for attempt in range(1, MAX_RETRIES + 1):
         print(f"  Attempt {attempt}/{MAX_RETRIES}...")
         try:
-            data = extract_fn(provider, client, url)
+            data = extract_fn(client, url)
             if data is not None:
                 return data
         except Exception as exc:
