@@ -422,11 +422,11 @@ def _extract_via_proxy_and_gemini(provider: str, proxy_key: str, url: str, schem
         client = genai.Client(api_key=GEMINI_API_KEY)
         
         full_prompt = (
-            f"HTML Content:\n"
+            "HTML Content:\n"
             f"```html\n{cleaned_html[:250000]}\n```\n\n"
             f"Extraction request: {prompt}\n\n"
-            f"Instructions:\n"
-            f"Extract the requested data and return ONLY a valid JSON object matching the JSON-LD schema layout below:\n"
+            "Instructions:\n"
+            "Extract the requested data and return ONLY a valid JSON object matching the JSON-LD schema layout below:\n"
             f"{json.dumps(schema)}"
         )
         
