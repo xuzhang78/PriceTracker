@@ -228,15 +228,15 @@ def _extract_price_once(client, url: str) -> dict | None:
     if html_content:
         parsed = parse_bh_product_html(html_content)
         if parsed and parsed.get("product_title") and parsed.get("current_price") > 0.0:
-            print(f"      🎯 FIRECRAWL: Successfully parsed product details via HTML regex (Save successful!).")
+            print("      🎯 FIRECRAWL: Successfully parsed product details via HTML regex (Save successful!).")
             return parsed
         else:
             print(f"      ⚠️  FIRECRAWL: Regex parsing returned incomplete data (Title: {parsed.get('product_title') if parsed else 'None'}, Price: {parsed.get('current_price') if parsed else 'None'}).")
     else:
-        print(f"      ⚠️  FIRECRAWL: Failed to fetch HTML content.")
+        print("      ⚠️  FIRECRAWL: Failed to fetch HTML content.")
 
     # Fallback to LLM structured extraction if html-only scrape or regex parsing failed
-    print(f"      🔄 FIRECRAWL: Falling back to LLM structured extraction...")
+    print("      🔄 FIRECRAWL: Falling back to LLM structured extraction...")
     doc = client.scrape(
         url,
         formats=[
