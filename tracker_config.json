@@ -11,7 +11,7 @@
         "buy 1 get 1",
         "buy one, get one"
       ],
-      "active": true
+      "active": false
     },
     {
       "type": "dealmoon_bogo",
@@ -24,7 +24,7 @@
         "buy 1 get 1",
         "buy one, get one"
       ],
-      "active": true
+      "active": false
     },
     {
       "type": "bh_price",
