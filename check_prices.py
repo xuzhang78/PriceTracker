@@ -254,18 +254,166 @@ def _extract_price_once(client, url: str) -> dict | None:
     return None
 
 
-def _extract_iphone_price_once(client, url: str) -> dict | None:
-    """LLM-only extraction for iPhone product pages (BestBuy, Verizon).
+def parse_verizon_product_html(html: str, target_sku: str = "sku6037331", target_sor_id: str = "MFXM4LL/A") -> dict | None:
+    """Extract product title, full retail price, and stock status from Verizon product page HTML.
 
-    Unlike B&H products, these sites have no stable data-selenium attributes
-    for regex parsing, so we go straight to LLM structured extraction.
+    Verizon embeds Next.js App Router server component payloads (self.__next_f.push)
+    containing full catalog objects with uncompromised variant pricing and shipping stock.
     """
+    if not html:
+        return None
 
+    # 1. Product title extraction
+    title = ""
+    sku_pos = html.find(target_sku)
+    if sku_pos != -1:
+        snip = html[max(0, sku_pos - 1500):min(len(html), sku_pos + 1500)]
+        clean_snip = re.sub(r'\\+"', '"', snip)
+        m_title = re.search(r'"skuDisplayName":\s*"([^"]+)"', clean_snip)
+        if m_title:
+            title = m_title.group(1).strip()
+    if not title:
+        h1_m = re.search(r'<h1[^>]*>(.*?)</h1>', html, re.DOTALL | re.IGNORECASE)
+        if h1_m:
+            raw_h1 = re.sub(r'<[^>]*>', '', h1_m.group(1)).strip()
+            if raw_h1:
+                title = f"{raw_h1} 512GB Deep Blue"
+    if not title:
+        title = "Apple iPhone 17 Pro Max 512GB Deep Blue"
+
+    price = 0.0
+    stock_status = "Unknown"
+
+    # 2. In Verizon's Next.js payload, mappedChildSkus has the exact product variant details:
+    # "MFXM4LL/A": { ... "price": { ... "buyProductMaxPurch": 1399.99 ... } ... }
+    key_pattern = rf'{re.escape(target_sor_id)}\\*":\s*\{{'
+    matches = list(re.finditer(key_pattern, html))
+
+    for match in matches:
+        pos = match.start()
+        raw_block = html[pos:pos + 20000]
+        # Restrict block to this specific variant (before the next sorId key)
+        next_key = re.search(r'\"MFX[A-Z0-9]{2}4LL/A\\*":\s*\{', raw_block[100:])
+        if next_key:
+            raw_block = raw_block[:100 + next_key.start()]
+
+        clean = re.sub(r'\\+"', '"', raw_block)
+        clean = re.sub(r'\\\\+', '', clean)
+
+        # Strategy A: Full Retail Price in contractText / originalPrice
+        full_retail = (
+            re.findall(r'"originalPrice":\s*([\d.]+)[^}]*?"contractText":\s*"Full Retail Price"', clean) or
+            re.findall(r'"contractText":\s*"Full Retail Price"[^}]*?"originalPrice":\s*([\d.]+)', clean)
+        )
+        if full_retail:
+            for p in full_retail:
+                val = float(p)
+                if 500.0 <= val <= 3000.0:
+                    price = val
+                    break
+
+        # Strategy B: buyProductMaxPurch
+        if price == 0.0:
+            bpms = re.findall(r'"buyProductMaxPurch":\s*([\d.]+)', clean)
+            if bpms:
+                for p in bpms:
+                    val = float(p)
+                    if 500.0 <= val <= 3000.0:
+                        price = val
+                        break
+
+        # Strategy C: Retail Price: $X in contractText
+        if price == 0.0:
+            rps = re.findall(r'Retail Price:\s*\$([\d.]+)', clean)
+            if rps:
+                for p in rps:
+                    val = float(p)
+                    if 500.0 <= val <= 3000.0:
+                        price = val
+                        break
+
+        # Stock availability (Shipping priority per workspace rules)
+        if '"isInStock":true' in clean:
+            stock_status = "In Stock"
+        elif '"isInStock":false' in clean:
+            stock_status = "Out of Stock"
+
+        if '"qtyAvailable":' in clean:
+            qty_m = re.search(r'"qtyAvailable":\s*(\d+)', clean)
+            if qty_m:
+                stock_status = "In Stock" if int(qty_m.group(1)) > 0 else "Out of Stock"
+
+        if '"isBackorder":true' in clean:
+            stock_status = "Backorder"
+
+        if price > 0.0:
+            break
+
+    if price == 0.0:
+        return None
+
+    return {
+        "product_title": title,
+        "current_price": price,
+        "stock_status": stock_status if stock_status != "Unknown" else "In Stock"
+    }
+
+
+def fetch_direct_html(url: str, timeout: int = 15) -> str | None:
+    """Attempt a fast, zero-credit direct HTTP fetch with standard browser headers."""
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    try:
+        r = requests.get(url, headers=headers, timeout=timeout)
+        if r.status_code == 200 and len(r.text) > 5000:
+            return r.text
+    except Exception as exc:
+        print(f"      ℹ️  Direct fetch bypassed ({exc})")
+    return None
+
+
+def _extract_iphone_price_once(client, url: str) -> dict | None:
+    """Extraction for iPhone product pages (BestBuy, Verizon)."""
+    if "verizon.com" in url:
+        # Step 1: Zero-credit direct HTTP fetch attempt
+        print("      🔍 Direct HTTP fetch for Verizon (0 credits)...")
+        direct_html = fetch_direct_html(url)
+        if direct_html:
+            parsed = parse_verizon_product_html(direct_html)
+            if parsed and parsed.get("current_price", 0.0) > 0.0:
+                print("      🎯 DIRECT FETCH: Successfully parsed Verizon product details (0 credits used)!")
+                return parsed
+
+        # Step 2: Fetch raw HTML via Firecrawl (1 credit, avoids broken click actions)
+        if client is not None:
+            try:
+                print("      🔍 Firecrawl: Fetching raw HTML for Verizon (1 credit)...")
+                doc = client.scrape(url, formats=["html"])
+                html_content = None
+                if hasattr(doc, "html") and doc.html:
+                    html_content = doc.html
+                elif isinstance(doc, dict) and "html" in doc:
+                    html_content = doc["html"]
+                if html_content:
+                    parsed = parse_verizon_product_html(html_content)
+                    if parsed and parsed.get("current_price", 0.0) > 0.0:
+                        print("      🎯 FIRECRAWL: Successfully parsed Verizon product details via HTML catalog parser!")
+                        return parsed
+            except Exception as exc:
+                print(f"      ⚠️  Firecrawl HTML scrape exception: {exc}")
+
+    # Fallback to Firecrawl LLM structured extraction (used for BestBuy or as backup)
     schema = IPhoneProductSchema.model_json_schema()
     prompt = _IPHONE_PRICE_PROMPT
 
     try:
-        print(f"      🔍 Firecrawl: LLM structured extraction for iPhone (URL: {url})...")
+        print(f"      🔍 Firecrawl: LLM structured extraction (URL: {url})...")
         scrape_params = {
             "formats": [
                 {
@@ -276,25 +424,19 @@ def _extract_iphone_price_once(client, url: str) -> dict | None:
             ]
         }
         
-        # Click the 512GB option on Verizon before extracting price
-        if "verizon.com" in url:
-            scrape_params["actions"] = [
-                {"type": "click", "selector": "text=512 GB"},
-                {"type": "wait", "milliseconds": 2000}
-            ]
-            
         # Give BestBuy plenty of time due to anti-bot timeouts
         if "bestbuy.com" in url:
             scrape_params["timeout"] = 120000
 
-        doc = client.scrape(
-            url,
-            **scrape_params
-        )
-        if hasattr(doc, "json") and doc.json is not None:
-            if isinstance(doc.json, dict) and "current_price" in doc.json:
-                return doc.json
-        print("      ⚠️  Firecrawl: 'json' field empty or malformed.")
+        if client is not None:
+            doc = client.scrape(
+                url,
+                **scrape_params
+            )
+            if hasattr(doc, "json") and doc.json is not None:
+                if isinstance(doc.json, dict) and "current_price" in doc.json:
+                    return doc.json
+            print("      ⚠️  Firecrawl: 'json' field empty or malformed.")
         return None
     except Exception as exc:
         print(f"      ⚠️  Firecrawl exception: {exc}")
@@ -411,6 +553,18 @@ def _extract_via_proxy_and_gemini(provider: str, proxy_key: str, url: str, schem
         print(f"      ⚠️  Proxy fetch via {provider.upper()} returned empty content.")
         return None
 
+    # Check deterministic HTML regex/catalog parsers first (zero LLM token cost)
+    if "verizon.com" in url:
+        parsed = parse_verizon_product_html(html_content)
+        if parsed and parsed.get("current_price", 0.0) > 0.0:
+            print(f"      🎯 {provider.upper()}: Successfully parsed Verizon product details via HTML catalog parser (Zero LLM cost!).")
+            return parsed
+    elif "bhphotovideo.com" in url:
+        parsed = parse_bh_product_html(html_content)
+        if parsed and parsed.get("current_price", 0.0) > 0.0:
+            print(f"      🎯 {provider.upper()}: Successfully parsed B&H product details via HTML regex (Zero LLM cost!).")
+            return parsed
+
     try:
         print("      🧠 Gemini: Extracting structured data from retrieved HTML...")
         from google.genai import types
@@ -418,12 +572,29 @@ def _extract_via_proxy_and_gemini(provider: str, proxy_key: str, url: str, schem
         # Clean HTML to minimize tokens and prevent truncation
         cleaned_html = clean_html(html_content, keep_catalog_scripts=True)
         
+        # Ensure the prompt slice includes target catalog/SKU markers rather than blindly truncating
+        if len(cleaned_html) > 250000:
+            marker_pos = -1
+            for marker in ["sku6037331", "MFXM4LL/A", "pricingPrice", "productTitle"]:
+                p = cleaned_html.find(marker)
+                if p != -1:
+                    marker_pos = p
+                    break
+            if marker_pos != -1:
+                start_slice = max(0, marker_pos - 50000)
+                end_slice = min(len(cleaned_html), start_slice + 250000)
+                html_for_llm = cleaned_html[start_slice:end_slice]
+            else:
+                html_for_llm = cleaned_html[:250000]
+        else:
+            html_for_llm = cleaned_html
+
         # Initialize unified Client
         client = genai.Client(api_key=GEMINI_API_KEY)
         
         full_prompt = (
             "HTML Content:\n"
-            f"```html\n{cleaned_html[:250000]}\n```\n\n"
+            f"```html\n{html_for_llm}\n```\n\n"
             f"Extraction request: {prompt}\n\n"
             "Instructions:\n"
             "Extract the requested data and return ONLY a valid JSON object matching the JSON-LD schema layout below:\n"
