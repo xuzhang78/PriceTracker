@@ -416,7 +416,7 @@ git config --global credential.helper manager
 
 ## 9. ntfy.sh Setup
 
-**Topic:** `your-ntfy-topic` (pre-generated random string)
+**Topic:** `your-ntfy-topic` (choose a long random topic name; anyone who knows it can read your alerts)
 
 **Subscribe:** Install ntfy app → tap **+** → enter `your-ntfy-topic`
 

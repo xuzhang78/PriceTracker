@@ -86,7 +86,7 @@ pip install -r requirements.txt
 ```bash
 FIRECRAWL_API_KEY=fc-xxxxxxxxxxxxxxxxxxxxxxxx   # from firecrawl.dev
 SCRAPERAPI_KEY=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx  # optional backup from scraperapi.com
-NTFY_TOPIC=your-ntfy-topic                 # already set — use as-is
+NTFY_TOPIC=your-ntfy-topic                       # choose a long random topic name
 ```
 
 ### Step 3 — Add GitHub Secrets
