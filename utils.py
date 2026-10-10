@@ -3,6 +3,7 @@ Shared utilities for PriceTracker scripts.
 
 Provides common functions used by both check_prices.py and check_deals.py:
   - clean_html:       Strip CSS/SVG/comment/script bloat from HTML before LLM processing
+  - redact:           Mask API keys and the ntfy topic before text reaches logs
   - send_ntfy:        POST push notifications to ntfy.sh
   - select_provider:  Choose the primary extraction provider (Firecrawl or none)
 """
@@ -10,6 +11,7 @@ Provides common functions used by both check_prices.py and check_deals.py:
 import os
 import re
 import time
+import urllib.parse
 
 import requests
 
@@ -21,6 +23,37 @@ load_dotenv()
 
 FIRECRAWL_API_KEY = os.getenv("FIRECRAWL_API_KEY", "")
 NTFY_TOPIC        = os.getenv("NTFY_TOPIC", "")
+
+
+# ── Log Redaction ─────────────────────────────────────────────────────────────
+
+_SECRET_ENV_VARS = (
+    "FIRECRAWL_API_KEY",
+    "SCRAPERAPI_KEY",
+    "SCRAPE_DO_KEY",
+    "GEMINI_API_KEY",
+    "NTFY_TOPIC",
+)
+
+
+def redact(text: object) -> str:
+    """Return str(text) with the current values of known secret env vars masked.
+
+    Exceptions from requests/httpx often embed the full request URL, which can
+    carry a proxy key as a query parameter or the ntfy topic in the path. Each
+    secret value (and its URL-encoded form) is replaced with ``<VAR_NAME>``.
+    Values are read from the environment at call time so late-set vars are
+    covered too; empty/unset vars are ignored.
+    """
+    out = str(text)
+    for name in _SECRET_ENV_VARS:
+        value = os.getenv(name, "")
+        if not value:
+            continue
+        for needle in {value, urllib.parse.quote(value, safe="")}:
+            if needle:
+                out = out.replace(needle, f"<{name}>")
+    return out
 
 
 # ── HTML Minimization ─────────────────────────────────────────────────────────
@@ -86,7 +119,7 @@ def send_ntfy(title: str, body: str, *, priority: str = "default",
             response.raise_for_status()
             return
         except requests.RequestException as exc:
-            print(f"    ⚠️  ntfy send attempt {attempt}/3 failed: {exc}")
+            print(f"    ⚠️  ntfy send attempt {attempt}/3 failed: {redact(exc)}")
             if attempt < 3:
                 time.sleep(5)
     print(f"    ❌ ntfy: all 3 attempts failed — alert '{safe_title}' was NOT delivered.")

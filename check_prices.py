@@ -37,7 +37,7 @@ import requests
 from google import genai
 from dotenv import load_dotenv
 from pydantic import BaseModel
-from utils import send_ntfy, select_provider, clean_html
+from utils import send_ntfy, select_provider, clean_html, redact
 
 # ── Configuration ──────────────────────────────────────────────────────────────
 
@@ -222,7 +222,7 @@ def _extract_price_once(client, url: str) -> dict | None:
         elif isinstance(doc, dict) and "html" in doc:
             html_content = doc["html"]
     except Exception as exc:
-        print(f"      ⚠️  Firecrawl html scrape exception: {exc}")
+        print(f"      ⚠️  Firecrawl html scrape exception: {redact(exc)}")
 
     # Parse HTML using regex
     if html_content:
@@ -374,7 +374,7 @@ def fetch_direct_html(url: str, timeout: int = 15) -> str | None:
         if r.status_code == 200 and len(r.text) > 5000:
             return r.text
     except Exception as exc:
-        print(f"      ℹ️  Direct fetch bypassed ({exc})")
+        print(f"      ℹ️  Direct fetch bypassed ({redact(exc)})")
     return None
 
 
@@ -406,7 +406,7 @@ def _extract_iphone_price_once(client, url: str) -> dict | None:
                         print("      🎯 FIRECRAWL: Successfully parsed Verizon product details via HTML catalog parser!")
                         return parsed
             except Exception as exc:
-                print(f"      ⚠️  Firecrawl HTML scrape exception: {exc}")
+                print(f"      ⚠️  Firecrawl HTML scrape exception: {redact(exc)}")
 
     # Fallback to Firecrawl LLM structured extraction (used for BestBuy or as backup)
     schema = IPhoneProductSchema.model_json_schema()
@@ -439,7 +439,7 @@ def _extract_iphone_price_once(client, url: str) -> dict | None:
             print("      ⚠️  Firecrawl: 'json' field empty or malformed.")
         return None
     except Exception as exc:
-        print(f"      ⚠️  Firecrawl exception: {exc}")
+        print(f"      ⚠️  Firecrawl exception: {redact(exc)}")
         return None
 
 
@@ -474,7 +474,7 @@ def try_extract_product(
             if data is not None:
                 return data
         except Exception as exc:
-            print(f"      ⚠️  {provider.upper()} exception: {exc}")
+            print(f"      ⚠️  {provider.upper()} exception: {redact(exc)}")
 
         if attempt < MAX_RETRIES:
             delay = RETRY_DELAYS[attempt - 1]
@@ -546,7 +546,7 @@ def _extract_via_proxy_and_gemini(provider: str, proxy_key: str, url: str, schem
         else:
             return None
     except Exception as e:
-        print(f"      ⚠️  Proxy fetch exception via {provider.upper()}: {e}")
+        print(f"      ⚠️  Proxy fetch exception via {provider.upper()}: {redact(e)}")
         return None
 
     if not html_content:
@@ -617,7 +617,7 @@ def _extract_via_proxy_and_gemini(provider: str, proxy_key: str, url: str, schem
             print("      ⚠️  Gemini: Empty response text.")
             return None
     except Exception as e:
-        print(f"      ⚠️  Gemini extraction exception: {e}")
+        print(f"      ⚠️  Gemini extraction exception: {redact(e)}")
         return None
 
 
@@ -688,7 +688,7 @@ def process_product_result(product: dict, json_data: dict | None) -> None:
         product_title = str(json_data["product_title"])
         stock_status  = str(json_data["stock_status"])
     except (KeyError, TypeError, ValueError) as exc:
-        msg = f"Field read error: {exc} | json_data: {json_data}"
+        msg = f"Field read error: {redact(exc)} | json_data: {json_data}"
         print(f"  ❌ {msg}")
         notify_extraction_error(name, msg)
         return

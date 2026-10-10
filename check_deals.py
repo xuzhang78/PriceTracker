@@ -47,7 +47,7 @@ import requests
 from google import genai
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
-from utils import send_ntfy, select_provider, clean_html
+from utils import send_ntfy, select_provider, clean_html, redact
 
 # ── Configuration ──────────────────────────────────────────────────────────────
 
@@ -255,7 +255,7 @@ def _extract_once(client, url: str, include_expired: bool) -> dict | None:
         print("      ⚠️  Firecrawl: 'json' field empty or malformed.")
         return None
     except Exception as exc:
-        print(f"      ⚠️  Firecrawl exception: {exc}")
+        print(f"      ⚠️  Firecrawl exception: {redact(exc)}")
         return None
 
 
@@ -341,7 +341,7 @@ def _extract_deals_via_proxy_and_gemini(provider: str, proxy_key: str, url: str,
         else:
             return None
     except Exception as e:
-        print(f"      ⚠️  Proxy fetch exception via {provider.upper()}: {e}")
+        print(f"      ⚠️  Proxy fetch exception via {provider.upper()}: {redact(e)}")
         return None
 
     if not html_content:
@@ -401,7 +401,7 @@ def _extract_deals_via_proxy_and_gemini(provider: str, proxy_key: str, url: str,
             print("      ⚠️  Gemini: Empty response text.")
             return None
     except Exception as e:
-        print(f"      ⚠️  Gemini extraction exception: {e}")
+        print(f"      ⚠️  Gemini extraction exception: {redact(e)}")
         return None
 
 
