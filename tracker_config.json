@@ -11,7 +11,7 @@
         "buy 1 get 1",
         "buy one, get one"
       ],
-      "active": false
+      "active": true
     },
     {
       "type": "dealmoon_bogo",
@@ -47,7 +47,7 @@
       "url": "https://www.bestbuy.com/product/apple-iphone-17-pro-max-512gb-deep-blue-verizon/JCQ6HQTQVJ/sku/6472872",
       "threshold": 1399.00,
       "start_date": "2026-09-01",
-      "active": true
+      "active": false
     },
     {
       "type": "iphone_price",
@@ -55,7 +55,7 @@
       "url": "https://www.verizon.com/smartphones/apple-iphone-17-pro-max/",
       "threshold": 1399.00,
       "start_date": "2026-09-01",
-      "active": true
+      "active": false
     }
   ]
 }
