@@ -56,6 +56,23 @@
       "threshold": 1399.00,
       "start_date": "2026-09-01",
       "active": false
+    },
+    {
+      "type": "promo_watch",
+      "name": "Amex Gift Card fee-free promo",
+      "url": "https://www.amexgiftcard.com/",
+      "code_patterns": [
+        "\\bEPIC{YY}\\b",
+        "\\bHOLIDAY(?:RUSH)?{YY}\\b"
+      ],
+      "phrase_patterns": [
+        "100\\s*%\\s*off[^.!|]{0,80}?fees?",
+        "(?:no|\\$0|zero|waived?)\\s+purchase\\s+fees?"
+      ],
+      "start_date": "2026-11-20",
+      "end_date": "2026-12-31",
+      "active": true,
+      "note": "Fee waiver promo usually runs around Dec 10-15. {YY} expands to the current 2-digit year."
     }
   ]
 }

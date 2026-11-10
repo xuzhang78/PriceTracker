@@ -11,7 +11,7 @@ Uses **Firecrawl** (primary scraper + AI extraction), **ScraperAPI** / **Scrape.
 
 ### 1. 🛍️ Dealmoon BOGO Deal Tracker (`check_deals.py`)
 
-Monitors Dealmoon brand pages for "Buy One Get One" (BOGO) sale events on **Clinique** and **Lancome** (both currently paused in config).
+Monitors Dealmoon brand pages for "Buy One Get One" (BOGO) sale events on **Lancome** (active) and **Clinique** (paused in config).
 Sends a high-priority push notification the moment a new active BOGO deal is detected.
 
 ```
@@ -60,9 +60,30 @@ GitHub Actions (daily 10:00 UTC)
 ```
 
 **Key features:**
-- **start_date gating**: Tracker entries support a `start_date` field; the script skips entries until that date. The iPhone trackers started on **2026-09-01**.
+- **start_date gating**: Tracker entries support a `start_date` field; the script skips entries until that date. The iPhone trackers started on **2026-09-01** and are currently paused.
 - **Full-price extraction**: Prompt explicitly requests the one-time purchase price, avoiding monthly installment amounts.
 - **Verizon catalog parser**: Verizon's Next.js payload is parsed directly for the target SKU's price and shipping stock status before any LLM call.
+
+---
+
+### 4. 💳 Promo Watch (`check_promos.py`)
+
+Watches a page for a seasonal promotion. Configured for the American Express gift card fee waiver (100% off purchase and shipping fees), which usually runs in mid-December with a code such as `EPIC<YY>`.
+
+```
+GitHub Actions (daily 10:00 UTC, only inside the entry's date window)
+    └── check_promos.py
+            ├── fetch rendered page (Firecrawl, cache disabled → ScraperAPI → Scrape.do → direct)
+            ├── regex match: promo codes (raw HTML + text), fee-waiver phrases (visible text)
+            └── new match → ntfy.sh → 📱 your phone
+```
+
+**Key features:**
+- **No LLM**: Detection is pattern matching, so a check costs 1 Firecrawl credit and no Gemini tokens.
+- **Year placeholders**: `{YY}` / `{YYYY}` in a pattern expand to the current year, so `EPIC{YY}` matches `EPIC26` in 2026 and `EPIC27` in 2027 with no config change.
+- **Date window**: `start_date` and `end_date` limit checks to the weeks when the promo is expected.
+- **Persisted dedup**: `promo_state.json` is carried between workflow runs with the Actions cache, so a promo that stays live for days alerts once.
+- **Blind-spot alert**: If every provider is blocked, a warning notification is sent and the job fails.
 
 All configurations are managed in the unified config file `tracker_config.json`.
 
@@ -155,21 +176,31 @@ PRICE_OVERRIDE=1299.00 python check_prices.py
 
 Test modes (`PRICE_OVERRIDE`, `REPORT_MODE`, `TESTING`, `INCLUDE_EXPIRED`) cap retries at 1, bypass `start_date` gating, and skip the 2-hour full-flow retry.
 
+### Promo Watch
+
+```bash
+# Real check (1 Firecrawl credit per page; skipped outside the date window)
+python check_promos.py
+
+# Simulate a hit (no fetch, no state; sends a [TEST] alert if the text matches)
+PROMO_OVERRIDE="Use code EPIC26 for 100% off purchase fees" python check_promos.py
+```
+
 ---
 
 ## Testing on GitHub Actions
 
-Both trackers run from a single workflow, **Price & Deal Tracker** (`.github/workflows/tracker_check.yml`), as two jobs. Each job exits early if `tracker_config.json` has no active entry of its type.
+All trackers run from a single workflow, **Price & Deal Tracker** (`.github/workflows/tracker_check.yml`), as three jobs. Each job exits early if `tracker_config.json` has no active entry of its type.
 
 ### Manual run
 1. Go to **Actions → Price & Deal Tracker → Run workflow**
-2. Choose `run_tracker`: `auto` (respect `active` flags), `dealmoon`, `prices` or `both`
-3. Optional inputs: `include_expired=true` (Dealmoon E2E), `price_override` (simulate a drop), `report_mode=true` (real extraction, always notify)
+2. Choose `run_tracker`: `auto` (respect `active` flags and date windows), `dealmoon`, `prices`, `both` (Dealmoon + prices) or `promo`
+3. Optional inputs: `include_expired=true` (Dealmoon E2E), `price_override` (simulate a drop), `report_mode=true` (real extraction, always notify), `promo_override` (simulate promo page text)
 4. Click **Run workflow** and confirm the ntfy alert arrives on your phone ✅
 
 ### Scheduled run
 The daily cron (`0 10 * * *`) triggers automatically.
-When a new active BOGO deal or a price below threshold is found, you receive a push notification.
+When a new active BOGO deal, a price below threshold, or a watched promo is found, you receive a push notification.
 
 ---
 
@@ -231,6 +262,27 @@ The `start_date` field (format: `YYYY-MM-DD`) delays tracking until that date. T
 
 ---
 
+## Managing Promo Watches
+
+```json
+{
+  "type": "promo_watch",
+  "name": "Amex Gift Card fee-free promo",
+  "url": "https://www.amexgiftcard.com/",
+  "code_patterns": ["\\bEPIC{YY}\\b", "\\bHOLIDAY(?:RUSH)?{YY}\\b"],
+  "phrase_patterns": ["100\\s*%\\s*off[^.!|]{0,80}?fees?"],
+  "start_date": "2026-11-20",
+  "end_date": "2026-12-31",
+  "active": true
+}
+```
+
+- `code_patterns` are regexes searched in the raw HTML and the visible text. `phrase_patterns` are searched in the visible text only. Matching is case-insensitive.
+- To watch the same promo next year, move `start_date` and `end_date` forward. The `{YY}` placeholder updates itself.
+- Any page can be watched by adding another entry with its own URL and patterns.
+
+---
+
 ## Credit Usage
 
 Firecrawl is the only metered primary provider. Per request it charges 1 credit for an HTML-only scrape and 5 credits for a scrape with JSON (LLM) extraction. The trackers minimise LLM use:
@@ -238,12 +290,14 @@ Firecrawl is the only metered primary provider. Per request it charges 1 credit 
 * **BOGO Tracker**: One JSON + HTML scrape per brand per day (5 credits). Two brands: 10 credits/day.
 * **MacBook Price Tracker**: HTML-only scrape plus regex parsing (1 credit). JSON extraction (5 credits) only if regex fails. Two products: 2 credits/day.
 * **iPhone Price Tracker**: Verizon tries a free direct fetch first, then a 1-credit HTML scrape, then JSON extraction (5 credits). BestBuy uses JSON extraction (5 credits). Worst case for two stores: 10 credits/day.
+* **Promo Watch**: One rendered scrape per page per day with no LLM extraction (1 credit), only inside the entry's date window.
 
 | Tracker | Schedule | Requests/month | Credits/month (worst case) | Status |
 |---|---|---|---|---|
-| BOGO Tracker (2 brands) | Daily | 60 | 300 | Paused |
+| BOGO Tracker (Lancome) | Daily | 30 | 150 | Active (Clinique paused) |
 | MacBook Tracker (2 models) | Daily | 60 | 60 | Paused |
-| iPhone Tracker (2 stores) | Daily | 60 | 300 | Active since 2026-09-01 |
+| iPhone Tracker (2 stores) | Daily | 60 | 300 | Paused |
+| Promo Watch (1 page) | Daily, Nov 20 to Dec 31 | 42 per season | 42 | Active in its date window |
 
 > **Note:** If Firecrawl fails for a product, the script falls back to **ScraperAPI** and then **Scrape.do** (each only if its key is set). The fetched HTML is parsed with regex where possible, otherwise sent to **Gemini** for extraction. Those services have their own quotas; Gemini `gemini-2.5-flash` is used.
 
@@ -266,5 +320,6 @@ Firecrawl is the only metered primary provider. Per request it charges 1 credit 
 | `Extraction Error` alert with price out of range | Blocked page or layout change | Sanity guard rejects prices outside $100–$10,000. Inspect the page and adjust parsers or prompts |
 | No ntfy notification | Wrong topic name | Confirm topic in ntfy app matches `NTFY_TOPIC` in secrets |
 | BOGO deal not detected | Keywords don't match | Check `tracker_config.json` keywords vs. actual deal text |
-| Duplicate alerts | State file reset or deleted | `deals_state.json` tracks notified deals locally; do not delete manually |
+| Duplicate alerts | State file reset or deleted | `deals_state.json` tracks notified deals locally; do not delete manually. Promo state lives in the Actions cache (`promo-state-*`) |
+| `Promo Tracker — Fetch Failed` alert | Every provider was blocked or returned an empty page | Check the run log for the provider messages; promo detection is blind until a provider works |
 | Credits running out | Daily checks using too many credits | Pause trackers in `tracker_config.json`, or set a `start_date` to delay them |

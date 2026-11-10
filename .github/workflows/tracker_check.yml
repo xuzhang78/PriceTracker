@@ -20,6 +20,7 @@ on:
           - dealmoon
           - prices
           - both
+          - promo
       include_expired:
         description: "Dealmoon: set 'true' to include expired deals (E2E pipeline test)"
         required: false
@@ -32,6 +33,10 @@ on:
         description: "Prices: set 'true' to do real extraction and always notify with actual price (pipeline verification)"
         required: false
         default: "false"
+      promo_override:
+        description: "Promo: simulate page text (e.g. 'Use code EPIC26 for 100% off purchase fees'). Skips fetching; sends a [TEST] alert on match."
+        required: false
+        default: ""
 
 # ── Subagent: Dealmoon BOGO ────────────────────────────────────────────────────
 jobs:
@@ -146,3 +151,70 @@ jobs:
           REPORT_MODE:       ${{ inputs.report_mode || 'false' }}
           TESTING:           ${{ github.event_name == 'workflow_dispatch' && 'true' || 'false' }}
         run: python check_prices.py
+
+# ── Subagent: Promo Watch (Amex gift card fee waiver) ──────────────────────────
+  promos:
+    name: "Promo Watch"
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_tracker == 'auto' || inputs.run_tracker == 'promo' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Gate — skip if not targeted or no promo page in its date window
+        id: gate
+        run: |
+          override="${{ inputs.run_tracker || 'auto' }}"
+
+          if [ "$override" = "promo" ]; then
+            echo "skip=false" >> $GITHUB_OUTPUT
+            echo "✅ Targeted by run_tracker=$override"
+            exit 0
+          fi
+
+          count=$(jq --arg today "$(date +%F)" '[.trackers[] | select(.type == "promo_watch" and .active == true and (.start_date == null or .start_date == "" or .start_date <= $today) and (.end_date == null or .end_date == "" or .end_date >= $today))] | length' tracker_config.json)
+          if [ "$count" -gt 0 ]; then
+            echo "skip=false" >> $GITHUB_OUTPUT
+            echo "✅ $count promo page(s) inside their date window — proceeding"
+          else
+            echo "skip=true" >> $GITHUB_OUTPUT
+            echo "⏭️  No promo_watch entries inside their date window — skipping"
+          fi
+
+      - uses: actions/setup-python@v6
+        if: steps.gate.outputs.skip != 'true'
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        if: steps.gate.outputs.skip != 'true'
+        run: pip install -r requirements.txt
+
+      # promo_state.json records alerts already sent, so a promo that stays
+      # live for several days notifies once. Runners are ephemeral, so the
+      # file is carried between runs through the Actions cache.
+      - name: Restore promo state
+        if: steps.gate.outputs.skip != 'true'
+        uses: actions/cache/restore@v5
+        with:
+          path: promo_state.json
+          key: promo-state-${{ github.run_id }}
+          restore-keys: promo-state-
+
+      - name: Run promo check
+        if: steps.gate.outputs.skip != 'true'
+        env:
+          FIRECRAWL_API_KEY: ${{ secrets.FIRECRAWL_API_KEY }}
+          SCRAPERAPI_KEY:    ${{ secrets.SCRAPERAPI_KEY }}
+          SCRAPE_DO_KEY:     ${{ secrets.SCRAPE_DO_KEY }}
+          NTFY_TOPIC:        ${{ secrets.NTFY_TOPIC }}
+          PROMO_OVERRIDE:    ${{ inputs.promo_override }}
+          TESTING:           ${{ github.event_name == 'workflow_dispatch' && 'true' || 'false' }}
+        run: python check_promos.py
+
+      - name: Save promo state
+        if: always() && steps.gate.outputs.skip != 'true' && hashFiles('promo_state.json') != ''
+        uses: actions/cache/save@v5
+        with:
+          path: promo_state.json
+          key: promo-state-${{ github.run_id }}
