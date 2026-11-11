@@ -68,18 +68,19 @@ GitHub Actions (daily 10:00 UTC)
 
 ### 4. 💳 Promo Watch (`check_promos.py`)
 
-Watches a page for a seasonal promotion. Configured for the American Express gift card fee waiver (100% off purchase and shipping fees), which usually runs in mid-December with a code such as `EPIC<YY>`.
+Watches a page for a seasonal promotion. Configured for the American Express gift card promotion that waives **both** purchase and shipping fees, which usually runs in mid-December with a code such as `EPIC<YY>`. Offers that waive only one of the two fees are ignored.
 
 ```
 GitHub Actions (daily 10:00 UTC, only inside the entry's date window)
     └── check_promos.py
             ├── fetch rendered page (Firecrawl, cache disabled → ScraperAPI → Scrape.do → direct)
-            ├── regex match: promo codes (raw HTML + text), fee-waiver phrases (visible text)
+            ├── regex match: promo code, or purchase-fee AND shipping-fee waiver wording close together
             └── new match → ntfy.sh → 📱 your phone
 ```
 
 **Key features:**
 - **No LLM**: Detection is pattern matching, so a check costs 1 Firecrawl credit and no Gemini tokens.
+- **Both-fees rule**: `combo_patterns` groups must all match within `combo_window` characters of each other, so "100% off purchase fees" alone or "free shipping" alone does not alert.
 - **Year placeholders**: `{YY}` / `{YYYY}` in a pattern expand to the current year, so `EPIC{YY}` matches `EPIC26` in 2026 and `EPIC27` in 2027 with no config change.
 - **Date window**: `start_date` and `end_date` limit checks to the weeks when the promo is expected.
 - **Persisted dedup**: `promo_state.json` is carried between workflow runs with the Actions cache, so a promo that stays live for days alerts once.
@@ -269,15 +270,22 @@ The `start_date` field (format: `YYYY-MM-DD`) delays tracking until that date. T
   "type": "promo_watch",
   "name": "Amex Gift Card fee-free promo",
   "url": "https://www.amexgiftcard.com/",
-  "code_patterns": ["\\bEPIC{YY}\\b", "\\bHOLIDAY(?:RUSH)?{YY}\\b"],
-  "phrase_patterns": ["100\\s*%\\s*off[^.!|]{0,80}?fees?"],
+  "code_patterns": ["\\bEPIC{YY}\\b"],
+  "combo_patterns": {
+    "purchase fee waived": ["100\\s*%\\s*off\\s+purchase\\b", "..."],
+    "shipping fee waived": ["free\\s+(?:\\w+\\s+){0,2}shipping", "..."]
+  },
+  "combo_window": 250,
   "start_date": "2026-11-20",
   "end_date": "2026-12-31",
   "active": true
 }
 ```
 
-- `code_patterns` are regexes searched in the raw HTML and the visible text. `phrase_patterns` are searched in the visible text only. Matching is case-insensitive.
+- `code_patterns` are regexes searched in the raw HTML and the visible text. A match alerts on its own.
+- `combo_patterns` maps a group name to alternative regexes. It alerts only when every group matches within `combo_window` characters in the visible text.
+- `phrase_patterns` (optional) are single regexes on the visible text; any one match alerts.
+- Matching is case-insensitive. The full pattern lists are in `tracker_config.json`.
 - To watch the same promo next year, move `start_date` and `end_date` forward. The `{YY}` placeholder updates itself.
 - Any page can be watched by adding another entry with its own URL and patterns.
 

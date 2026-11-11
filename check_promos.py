@@ -9,7 +9,10 @@ Each `promo_watch` entry lists regex patterns. `{YY}` and `{YYYY}` are replaced
 with the current year, so "EPIC{YY}" matches EPIC26 in 2026 and EPIC27 in 2027.
 
   - code_patterns:   searched in the raw HTML and the visible text
-  - phrase_patterns: searched in the visible text only
+  - phrase_patterns: searched in the visible text only; any one match alerts
+  - combo_patterns:  named groups of patterns; alerts only when EVERY group
+                     matches within combo_window characters of each other
+                     (e.g. a purchase-fee waiver AND a shipping-fee waiver)
 
 No LLM is involved. Detection is plain pattern matching on a rendered page.
 
@@ -59,6 +62,7 @@ STATE_PATH   = os.path.join(BASE_DIR, "promo_state.json")
 # A rendered page with less visible text than this is treated as blocked/empty
 MIN_PAGE_TEXT_CHARS = 300
 SNIPPET_RADIUS      = 80
+DEFAULT_COMBO_WINDOW = 250
 MAX_MATCHES_IN_ALERT = 5
 
 _BLOCK_MARKERS = re.compile(
@@ -116,6 +120,8 @@ def find_matches(entry: dict, raw: str, text: str, today: datetime.date) -> list
     code_patterns are searched in the visible text first, then the raw HTML
     (promo codes can sit in embedded JSON). phrase_patterns are searched in
     the visible text only, to avoid matching script internals.
+    combo_patterns yield a single match, and only when every group matches
+    close together in the visible text.
     """
     found: dict[str, dict] = {}
 
@@ -139,7 +145,60 @@ def find_matches(entry: dict, raw: str, text: str, today: datetime.date) -> list
 
     search(entry.get("code_patterns", []), "code", [text, raw])
     search(entry.get("phrase_patterns", []), "phrase", [text])
+
+    combo = find_combo(entry, text, today)
+    if combo:
+        found.setdefault(combo["match"].lower(), combo)
     return list(found.values())
+
+
+def find_combo(entry: dict, text: str, today: datetime.date) -> dict | None:
+    """Match combo_patterns: every named group must hit within combo_window chars.
+
+    Returns the tightest cluster as one match, or None. A page that waives
+    only the purchase fee, or only shipping, therefore produces nothing.
+    """
+    groups = entry.get("combo_patterns") or {}
+    if not groups:
+        return None
+    window = int(entry.get("combo_window", DEFAULT_COMBO_WINDOW))
+
+    spans: dict[str, list[tuple[int, int]]] = {}
+    for label, patterns in groups.items():
+        hits = []
+        for pattern in patterns:
+            try:
+                regex = re.compile(expand_pattern(pattern, today), re.IGNORECASE)
+            except re.error as exc:
+                print(f"    ⚠️  Invalid combo pattern {pattern!r}: {exc}")
+                continue
+            hits.extend(m.span() for m in regex.finditer(text))
+        if not hits:
+            return None                          # one group missing → no combo
+        spans[label] = hits
+
+    best: tuple[int, int, int] | None = None     # (extent, start, end)
+    first, *rest = spans.values()
+    for a_start, a_end in first:
+        lo, hi = a_start, a_end
+        for hits in rest:
+            # nearest hit of this group to the anchor
+            b_start, b_end = min(hits, key=lambda h: max(h[0] - a_end, a_start - h[1], 0))
+            if max(b_start - a_end, a_start - b_end, 0) > window:
+                break
+            lo, hi = min(lo, b_start), max(hi, b_end)
+        else:
+            if best is None or hi - lo < best[0]:
+                best = (hi - lo, lo, hi)
+    if best is None:
+        return None
+
+    _, lo, hi = best
+    return {
+        "kind": "combo",
+        "match": " + ".join(spans),              # e.g. "purchase fee waived + shipping fee waived"
+        "snippet": _snippet(text, lo, hi),
+    }
 
 
 def in_window(entry: dict, today: datetime.date) -> bool:

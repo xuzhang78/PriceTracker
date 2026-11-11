@@ -62,17 +62,26 @@
       "name": "Amex Gift Card fee-free promo",
       "url": "https://www.amexgiftcard.com/",
       "code_patterns": [
-        "\\bEPIC{YY}\\b",
-        "\\bHOLIDAY(?:RUSH)?{YY}\\b"
+        "\\bEPIC{YY}\\b"
       ],
-      "phrase_patterns": [
-        "100\\s*%\\s*off[^.!|]{0,80}?fees?",
-        "(?:no|\\$0|zero|waived?)\\s+purchase\\s+fees?"
-      ],
+      "combo_patterns": {
+        "purchase fee waived": [
+          "100\\s*%\\s*off\\s+(?:the\\s+|all\\s+)?(?:shipping\\s*(?:and|&|\\+|/)\\s*)?purchase\\b",
+          "(?:no|\\$0|zero|waived?)\\s+purchase\\s+(?:(?:or|and|&)\\s+shipping\\s+)?fees?",
+          "purchase\\s+(?:(?:and|&)\\s+shipping\\s+)?fees?\\s+(?:are\\s+|is\\s+)?waived"
+        ],
+        "shipping fee waived": [
+          "100\\s*%\\s*off\\s+(?:the\\s+|all\\s+)?(?:purchase\\s*(?:and|&|\\+|/)\\s*)?shipping\\b",
+          "free\\s+(?:\\w+\\s+){0,2}shipping",
+          "(?:no|\\$0|zero|waived?)\\s+(?:purchase\\s+(?:or|and|&)\\s+)?shipping\\s+(?:fees?|costs?|charges?)",
+          "shipping\\s+(?:fees?\\s+)?(?:are\\s+|is\\s+)?(?:waived|free)\\b"
+        ]
+      },
+      "combo_window": 250,
       "start_date": "2026-11-20",
       "end_date": "2026-12-31",
       "active": true,
-      "note": "Fee waiver promo usually runs around Dec 10-15. {YY} expands to the current 2-digit year."
+      "note": "Alerts only when purchase AND shipping fees are both waived, or when the EPIC code appears. Promo usually runs around Dec 10-15. {YY} expands to the current 2-digit year."
     }
   ]
 }
