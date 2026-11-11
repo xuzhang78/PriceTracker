@@ -72,12 +72,15 @@
         ],
         "shipping fee waived": [
           "100\\s*%\\s*off\\s+(?:the\\s+|all\\s+)?(?:purchase\\s*(?:and|&|\\+|/)\\s*)?shipping\\b",
-          "free\\s+(?:\\w+\\s+){0,2}shipping",
+          "(?:free|complimentary|no[- ]cost)\\s+(?:\\w+\\s+){0,2}shipping",
           "(?:no|\\$0|zero|waived?)\\s+(?:purchase\\s+(?:or|and|&)\\s+)?shipping\\s+(?:fees?|costs?|charges?)",
           "shipping\\s+(?:fees?\\s+)?(?:are\\s+|is\\s+)?(?:waived|free)\\b"
         ]
       },
       "combo_window": 250,
+      "phrase_patterns": [
+        "100\\s*%\\s*off\\s+(?:the\\s+|all\\s+)?purchase\\s+fees?\\s*(?:and|&|\\+|plus|,)\\s+[^.!|]{0,60}?shipping"
+      ],
       "start_date": "2026-11-20",
       "end_date": "2026-12-31",
       "active": true,
